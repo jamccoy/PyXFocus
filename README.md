@@ -1,5 +1,16 @@
-# PyXFocus
-General purpose raytracing software with an emphasis on X-ray telescope design
+# PyXFocus_GUI
+
+A PyQt5 graphical front end for **PyXFocus**, the general purpose raytracing
+package for X-ray telescope design, plus the cross-platform build and test
+tooling needed to run it outside Windows.
+
+This is a fork of [kbuffo/PyXFocus](https://github.com/kbuffo/PyXFocus).
+The raytracing engine — the Fortran kernels, surfaces, sources and analysis
+routines — is the original work of Ryan Allured and contributors, under the
+MIT licence in `LICENSE`. This fork adds the `gui/` package, the build
+script, the test suite, and fixes to make the package import off Windows.
+
+## Upstream acknowledgement
 
 Use of this software for academic and professional optical design work is permitted and encouraged.
 
@@ -12,14 +23,20 @@ This work makes use of PyXFocus, an open source Python-based raytracing package.
 
 ## Installing
 
-PyXFocus is imported as a package named `PyXFocus`, so the repository folder
-must be named `PyXFocus` and its **parent** directory must be on your Python
-path.
+**The folder must be named `PyXFocus`, not `PyXFocus_GUI`.** The package is
+imported as `import PyXFocus.surfaces`, so the directory Python sees has to
+be called `PyXFocus`, and its **parent** must be on your Python path. Since
+this repository is named `PyXFocus_GUI`, a plain `git clone` would produce a
+`PyXFocus_GUI/` folder and every import would fail. Clone into an explicit
+target instead:
 
 ```bash
-git clone https://github.com/kbuffo/PyXFocus.git
+git clone https://github.com/jamccoy/PyXFocus_GUI.git PyXFocus
 cd PyXFocus
 ```
+
+(The proper fix is to make the project `pip install`-able so the folder name
+stops mattering; until then, the explicit clone target is the workaround.)
 
 ### 1. Requirements
 
