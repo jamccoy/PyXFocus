@@ -3,14 +3,20 @@ import matplotlib.pyplot as plt
 from scipy.interpolate import griddata
 from scipy.optimize import curve_fit
 import pdb
-from utilities.imaging.fitting import circle,circleMerit
-from utilities.imaging.analysis import ptov,rms
-import utilities.imaging.man as man
-import utilities.imaging.fitting as fit
-import utilities.imaging.zernikemod as zern
+from PyXFocus._optional import optional_module, UTILITIES_INSTALL
 import PyXFocus.reconstruct as reconstruct
-import astropy.io.fits as pyfits
-import PyXFocus.specialFunctions as special
+
+#Only the OPD fitting and wavefront routines below need the external
+#utilities package, so load it lazily rather than at import time.
+man = optional_module('utilities.imaging.man',
+                      'wavefront padding (wavefront, compareOPDandSlopes)',
+                      UTILITIES_INSTALL)
+fit = optional_module('utilities.imaging.fitting',
+                      'Legendre OPD fitting (OPDtoLegendre)',
+                      UTILITIES_INSTALL)
+zern = optional_module('utilities.imaging.zernikemod',
+                       'Zernike OPD fitting (OPDtoZernike)',
+                       UTILITIES_INSTALL)
 #from PyXFocus.surfaces import focusI
 
 def centroid(rays,weights=None):

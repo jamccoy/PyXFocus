@@ -2,12 +2,17 @@
 import numpy as np
 import PyXFocus.surfacesf as surf
 import PyXFocus.zernsurf as zern
-# import PyXFocus.woltsurf as wolt
+import PyXFocus.woltsurf as wolt
 import PyXFocus.transformations as tran
 from PyXFocus.analyses import analyticYPlane, analyticXPlane, analyticImagePlane
 import PyXFocus.conicsolve as con
 import pdb
-import utilities.imaging.zernikemod as zernikemod
+from PyXFocus._optional import optional_module, UTILITIES_INSTALL
+
+#Only the zernsurf routines need this, so defer the import.
+zernikemod = optional_module('utilities.imaging.zernikemod',
+                             'Zernike surface modes (zernsurf, zernphase)',
+                             UTILITIES_INSTALL)
 import matplotlib.pyplot as plt
 
 

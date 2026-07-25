@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import reconstruct
+import PyXFocus.reconstruct as reconstruct
 import pdb  
 
 def padArrays(imglist):
