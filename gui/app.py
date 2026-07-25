@@ -126,13 +126,21 @@ class ParameterPanel(QtWidgets.QWidget):
 class MetricsBar(QtWidgets.QWidget):
     """Read-out strip for the numbers that come out of a trace."""
 
+    #: key, caption, tooltip
     FIELDS = [
-        ('hpd', 'HPD'),
-        ('rms', 'RMS radius'),
-        ('rays', 'Rays surviving'),
-        ('throughput', 'Throughput'),
-        ('area', 'Effective area'),
-        ('focus', 'Focus z'),
+        ('hpd', 'HPD', 'Half-power diameter: the angular diameter '
+                       'enclosing half the rays'),
+        ('rms', 'RMS radius', 'RMS ray distance from the centroid'),
+        ('rays', 'Rays surviving', 'Rays through both mirrors, of those '
+                                   'launched'),
+        ('throughput', 'Throughput', 'Fraction of launched rays surviving '
+                                     'vignetting'),
+        ('area', 'Collecting area', 'GEOMETRIC aperture times vignetting. '
+                                    'Excludes mirror reflectivity, which '
+                                    'PyXFocus does not model, so this is an '
+                                    'upper bound rather than a true '
+                                    'effective area.'),
+        ('focus', 'Focus z', 'Axial position of best focus'),
     ]
 
     def __init__(self, parent=None):
@@ -140,12 +148,14 @@ class MetricsBar(QtWidgets.QWidget):
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         self._values = {}
-        for key, label in self.FIELDS:
+        for key, label, tip in self.FIELDS:
             box = QtWidgets.QVBoxLayout()
             caption = QtWidgets.QLabel(label)
             caption.setStyleSheet('color: gray; font-size: 10px;')
             value = QtWidgets.QLabel('—')
             value.setStyleSheet('font-size: 15px; font-weight: bold;')
+            caption.setToolTip(tip)
+            value.setToolTip(tip)
             box.addWidget(caption)
             box.addWidget(value)
             layout.addLayout(box)
@@ -159,7 +169,7 @@ class MetricsBar(QtWidgets.QWidget):
         v['rays'].setText('%d / %d' % (result.num_surviving,
                                        result.num_launched))
         v['throughput'].setText('%.1f%%' % (100. * result.throughput))
-        v['area'].setText('%.2f cm²' % result.effective_area)
+        v['area'].setText('%.2f cm²' % result.collecting_area)
         v['focus'].setText('%.4f mm' % result.focus_z)
 
     def clear(self):
@@ -167,16 +177,240 @@ class MetricsBar(QtWidgets.QWidget):
             value.setText('—')
 
 
+class SweepWorker(QtCore.QThread):
+    """Runs a parameter sweep off the UI thread, with cancel support."""
+
+    progressed = QtCore.pyqtSignal(int, int)
+    swept = QtCore.pyqtSignal(object)
+    failed = QtCore.pyqtSignal(str)
+
+    def __init__(self, params, name, start, stop, steps, parent=None):
+        super(SweepWorker, self).__init__(parent)
+        self.params = params
+        self.name = name
+        #: Named start_value/stop_value, not start/stop: `self.start` would
+        #: shadow QThread.start() and break the thread launch.
+        self.start_value = start
+        self.stop_value = stop
+        self.steps = steps
+        self._stop = False
+
+    def cancel(self):
+        self._stop = True
+
+    def run(self):
+        try:
+            result = wolter.sweep(
+                self.params, self.name, self.start_value, self.stop_value,
+                self.steps,
+                progress=lambda done, total: self.progressed.emit(done, total),
+                should_stop=lambda: self._stop)
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+        else:
+            self.swept.emit(result)
+
+
+#: Sensible default sweep ranges, as (start, stop). Callables receive the
+#: baseline params so radius and focal length can scale with the design.
+DEFAULT_RANGES = {
+    'offaxis': (0., 10.),
+    'azimuth': (0., 360.),
+    'r0': (lambda p: p.r0 * .5, lambda p: p.r0 * 1.5),
+    'z0': (lambda p: p.z0 * .8, lambda p: p.z0 * 1.2),
+    'primary_length': (10., 300.),
+    'secondary_length': (10., 300.),
+    'psi': (0.5, 2.0),
+    'sec_dx': (0., 1.), 'sec_dy': (0., 1.), 'sec_dz': (0., 1.),
+    'sec_rx': (0., 2.), 'sec_ry': (0., 2.), 'sec_rz': (0., 2.),
+}
+
+
+class SweepTab(QtWidgets.QWidget):
+    """
+    Vary one parameter and plot how image quality responds.
+
+    This is the tolerancing question -- how far can a mirror shift before
+    the error budget is spent -- so HPD and throughput are plotted together
+    against the swept value.
+    """
+
+    def __init__(self, params_provider, parent=None):
+        super(SweepTab, self).__init__(parent)
+        self._params_provider = params_provider
+        self._worker = None
+        self._result = None
+
+        self.combo = QtWidgets.QComboBox()
+        for name, label, unit in wolter.SWEEPABLE:
+            self.combo.addItem('%s [%s]' % (label, unit) if unit else label,
+                               name)
+        self.combo.setCurrentIndex(
+            [n for n, _, _ in wolter.SWEEPABLE].index('sec_dy'))
+        self.combo.currentIndexChanged.connect(self._apply_default_range)
+
+        self.start = self._spin()
+        self.stop = self._spin()
+        self.steps = QtWidgets.QSpinBox()
+        self.steps.setRange(2, 500)
+        self.steps.setValue(30)
+
+        self.run_button = QtWidgets.QPushButton('Run sweep')
+        self.run_button.clicked.connect(self.run_sweep)
+        self.cancel_button = QtWidgets.QPushButton('Cancel')
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.clicked.connect(self._cancel)
+        self.save_button = QtWidgets.QPushButton('Save CSV…')
+        self.save_button.setEnabled(False)
+        self.save_button.clicked.connect(self.save_csv)
+
+        controls = QtWidgets.QHBoxLayout()
+        controls.addWidget(QtWidgets.QLabel('Vary:'))
+        controls.addWidget(self.combo, 1)
+        for label, widget in (('from', self.start), ('to', self.stop),
+                              ('steps', self.steps)):
+            controls.addWidget(QtWidgets.QLabel(label))
+            controls.addWidget(widget)
+        controls.addWidget(self.run_button)
+        controls.addWidget(self.cancel_button)
+        controls.addWidget(self.save_button)
+
+        self.progress = QtWidgets.QProgressBar()
+        self.progress.setVisible(False)
+
+        figure = Figure(figsize=(5, 4), tight_layout=True)
+        self.canvas = FigureCanvasQTAgg(figure)
+        self.ax = figure.add_subplot(111)
+        self.ax2 = self.ax.twinx()
+
+        box = QtWidgets.QVBoxLayout(self)
+        box.addLayout(controls)
+        box.addWidget(self.progress)
+        box.addWidget(NavigationToolbar2QT(self.canvas, self))
+        box.addWidget(self.canvas, 1)
+
+        self._apply_default_range()
+
+    @staticmethod
+    def _spin():
+        spin = QtWidgets.QDoubleSpinBox()
+        spin.setDecimals(4)
+        spin.setRange(-1e6, 1e6)
+        spin.setKeyboardTracking(False)
+        return spin
+
+    def _apply_default_range(self):
+        """Pick a useful range for the newly selected parameter."""
+        name = self.combo.currentData()
+        low, high = DEFAULT_RANGES.get(name, (0., 1.))
+        params = self._params_provider()
+        if callable(low):
+            low = low(params)
+        if callable(high):
+            high = high(params)
+        self.start.setValue(low)
+        self.stop.setValue(high)
+
+    def run_sweep(self):
+        if self._worker is not None and self._worker.isRunning():
+            return
+        name = self.combo.currentData()
+        self.run_button.setEnabled(False)
+        self.cancel_button.setEnabled(True)
+        self.progress.setVisible(True)
+        self.progress.setValue(0)
+
+        self._worker = SweepWorker(self._params_provider(), name,
+                                   self.start.value(), self.stop.value(),
+                                   self.steps.value(), self)
+        self._worker.progressed.connect(self._on_progress)
+        self._worker.swept.connect(self._on_swept)
+        self._worker.failed.connect(self._on_failed)
+        self._worker.start()
+
+    def _cancel(self):
+        if self._worker is not None:
+            self._worker.cancel()
+
+    def _on_progress(self, done, total):
+        self.progress.setMaximum(total)
+        self.progress.setValue(done)
+
+    def _on_swept(self, result):
+        self.run_button.setEnabled(True)
+        self.cancel_button.setEnabled(False)
+        self.progress.setVisible(False)
+        self._result = result
+        self.save_button.setEnabled(bool(result.valid.any()))
+        self._draw(result)
+
+    def _on_failed(self, message):
+        self.run_button.setEnabled(True)
+        self.cancel_button.setEnabled(False)
+        self.progress.setVisible(False)
+        QtWidgets.QMessageBox.critical(self, 'Sweep failed', message)
+
+    def _draw(self, result):
+        self.ax.clear()
+        self.ax2.clear()
+        good = result.valid
+
+        self.ax.plot(result.values[good], result.hpd_arcsec[good],
+                     color='#1f77b4', lw=1.8, marker='o', ms=3, label='HPD')
+        self.ax2.plot(result.values[good], 100. * result.throughput[good],
+                      color='#7f7f7f', lw=1.2, ls='--', label='Throughput')
+
+        # Mark where the baseline configuration sits.
+        base = getattr(result.params, result.name)
+        lo, hi = float(np.min(result.values)), float(np.max(result.values))
+        if lo <= base <= hi:
+            self.ax.axvline(base, color='crimson', ls=':', lw=1.2)
+
+        # Call out points that could not be traced at all.
+        if (~good).any():
+            self.ax.plot(result.values[~good],
+                         np.zeros((~good).sum()), 'x', color='crimson',
+                         ms=6, label='not traceable')
+
+        self.ax.set_xlabel(result.label)
+        self.ax.set_ylabel('HPD [arcsec]')
+        self.ax2.set_ylabel('throughput [%]', color='#7f7f7f')
+        self.ax2.set_ylim(0, 105)
+        self.ax.set_title('Sensitivity to %s' % result.label)
+        self.ax.grid(alpha=.3)
+
+        handles = self.ax.get_legend_handles_labels()[0] + \
+            self.ax2.get_legend_handles_labels()[0]
+        labels = self.ax.get_legend_handles_labels()[1] + \
+            self.ax2.get_legend_handles_labels()[1]
+        if handles:
+            self.ax.legend(handles, labels, loc='best', fontsize=8)
+
+        self.canvas.draw_idle()
+
+    def save_csv(self):
+        if self._result is None:
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, 'Save sweep as CSV', 'sweep_%s.csv' % self._result.name,
+            'CSV files (*.csv)')
+        if path:
+            self._result.to_csv(path)
+
+
 class PlotTabs(QtWidgets.QTabWidget):
     """Spot diagram, telescope profile, and encircled energy."""
 
-    def __init__(self, parent=None):
+    def __init__(self, params_provider, parent=None):
         super(PlotTabs, self).__init__(parent)
         self.spot_ax = self._add_tab('Spot Diagram')
         self.layout_ax = self._add_tab('Telescope Layout')
         self.ee_ax = self._add_tab('Encircled Energy')
         #: Zoom inset on the layout tab, rebuilt on every redraw.
         self._layout_inset = None
+        #: Sweeps run on demand, so this tab is not touched by draw_all.
+        self.sweep = SweepTab(params_provider)
+        self.addTab(self.sweep, 'Parameter Sweep')
 
     def _add_tab(self, title):
         page = QtWidgets.QWidget()
@@ -402,7 +636,7 @@ class MainWindow(QtWidgets.QMainWindow):
         left_box.addLayout(buttons)
 
         self.metrics = MetricsBar()
-        self.tabs = PlotTabs()
+        self.tabs = PlotTabs(self.panel.params)
 
         right = QtWidgets.QWidget()
         right_box = QtWidgets.QVBoxLayout(right)

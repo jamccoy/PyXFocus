@@ -111,6 +111,59 @@ def test_encircled_energy_consistent():
         % (half_power_radius, result.hpd_arcsec))
 
 
+def test_sweep_tracks_offaxis():
+    """A sweep reproduces the off-axis trend, point by point."""
+    from PyXFocus.gui.wolter import WolterParams, sweep
+    result = sweep(WolterParams(num_rays=4000), 'offaxis', 0., 8., 8)
+    assert result.valid.all(), 'every off-axis point should trace'
+    hpd = result.hpd_arcsec
+    assert np.all(np.diff(hpd) > 0), 'HPD should grow across the sweep: %s' % hpd
+    assert np.all(np.diff(result.throughput) < 0), 'throughput should fall'
+
+
+def test_sweep_survives_ungraceable_points():
+    """Points past the misalignment guard become NaN, not an exception."""
+    from PyXFocus.gui.wolter import WolterParams, sweep, MAX_ROTATION_ARCMIN
+    result = sweep(WolterParams(num_rays=2000), 'sec_ry', 0.,
+                   MAX_ROTATION_ARCMIN * 3, 7)
+    assert result.valid.any(), 'low-tilt points should still trace'
+    assert not result.valid.all(), 'high-tilt points should be rejected'
+    assert result.notes, 'rejected points should record a reason'
+
+
+def test_sweep_can_be_cancelled():
+    """should_stop truncates the sweep instead of running to completion."""
+    from PyXFocus.gui.wolter import WolterParams, sweep
+    done = []
+    result = sweep(WolterParams(num_rays=2000), 'offaxis', 0., 10., 20,
+                   progress=lambda d, t: done.append(d),
+                   should_stop=lambda: len(done) >= 4)
+    assert len(result.values) == 4, 'expected truncation to 4 points'
+    assert result.completed == 4
+
+
+def test_sweep_csv_roundtrip(tmp_path=None):
+    """The CSV export has one header plus one row per point."""
+    import os
+    import tempfile
+    from PyXFocus.gui.wolter import WolterParams, sweep
+    result = sweep(WolterParams(num_rays=2000), 'sec_dy', 0., .3, 5)
+    path = os.path.join(tempfile.mkdtemp(), 'sweep.csv')
+    result.to_csv(path)
+    lines = open(path).read().strip().split('\n')
+    assert len(lines) == 6, 'expected header + 5 rows, got %d' % len(lines)
+    assert lines[0].startswith('sec_dy[mm]'), 'unexpected header: %s' % lines[0]
+
+
+def test_collecting_area_is_geometric_only():
+    """Collecting area is aperture x throughput, with no reflectivity in it."""
+    from PyXFocus.gui.wolter import WolterParams, trace
+    result = trace(WolterParams(offaxis=2., num_rays=5000))
+    expected = result.geometric_area * result.throughput
+    assert np.isclose(result.collecting_area, expected), (
+        'collecting_area should be geometric_area * throughput')
+
+
 def test_reproducible():
     """The same seed gives the same answer twice."""
     from PyXFocus.gui.wolter import WolterParams, trace

@@ -158,8 +158,21 @@ class TraceResult(object):
         return float(self.num_surviving) / self.num_launched
 
     @property
-    def effective_area(self):
-        """Geometric collecting area surviving vignetting, in cm^2."""
+    def collecting_area(self):
+        """
+        Geometric aperture surviving vignetting, in cm^2.
+
+        This is *not* effective area.  It counts the entrance annulus that
+        makes it through both mirrors and nothing else -- there is no
+        mirror reflectivity in it, because PyXFocus ships no reflectivity
+        model.  A real Wolter-I loses roughly 10-20 per cent per bounce
+        with a good coating, twice, and far more as photon energy rises,
+        so treat this as a hard upper bound.
+
+        Turning it into a true effective area needs a coating reflectivity
+        table indexed by graze angle and energy; ``analyses.grazeAngle``
+        already supplies the per-ray graze angles.
+        """
         return self.geometric_area * self.throughput
 
     @property
@@ -330,6 +343,155 @@ def mirror_profile(params, num=200):
     zs = np.linspace(params.z0 - params.secondary_length, params.z0, num)
     rs = conic.secrad(zs, params.r0, params.z0, psi=params.psi)
     return (zp, rp), (zs, rs)
+
+
+#: Parameters a sweep can vary: name -> (label, unit).
+#: Ordered so the alignment terms, which are what tolerancing actually
+#: cares about, sit together at the end.
+SWEEPABLE = [
+    ('offaxis', 'Off-axis angle', 'arcmin'),
+    ('azimuth', 'Azimuth', 'deg'),
+    ('r0', 'Shell radius r0', 'mm'),
+    ('z0', 'Focal length z0', 'mm'),
+    ('primary_length', 'Primary length', 'mm'),
+    ('secondary_length', 'Secondary length', 'mm'),
+    ('psi', 'Prescription psi', ''),
+    ('sec_dx', 'Secondary shift x', 'mm'),
+    ('sec_dy', 'Secondary shift y', 'mm'),
+    ('sec_dz', 'Secondary shift z', 'mm'),
+    ('sec_rx', 'Secondary tilt x', 'arcmin'),
+    ('sec_ry', 'Secondary tilt y', 'arcmin'),
+    ('sec_rz', 'Secondary tilt z', 'arcmin'),
+]
+
+
+def sweep_label(name):
+    """Human label and unit for a sweepable parameter name."""
+    for key, label, unit in SWEEPABLE:
+        if key == name:
+            return label, unit
+    raise ValueError('%r is not a sweepable parameter' % name)
+
+
+class SweepResult(object):
+    """
+    Performance vs. one varied parameter.
+
+    Points that could not be traced -- a misalignment past the guard, a
+    geometry where every ray vignettes -- are left as NaN and their reason
+    recorded in ``notes``, so one bad point never aborts the sweep.
+    """
+
+    def __init__(self, params, name, values):
+        self.params = params
+        self.name = name
+        self.values = np.asarray(values, dtype=float)
+        n = len(self.values)
+        self.hpd_arcsec = np.full(n, np.nan)
+        self.rms_arcsec = np.full(n, np.nan)
+        self.throughput = np.full(n, np.nan)
+        self.collecting_area = np.full(n, np.nan)
+        self.num_surviving = np.zeros(n, dtype=int)
+        self.notes = {}
+        self.completed = 0
+
+    @property
+    def label(self):
+        label, unit = sweep_label(self.name)
+        return '%s [%s]' % (label, unit) if unit else label
+
+    @property
+    def valid(self):
+        """Mask of points that traced successfully."""
+        return np.isfinite(self.hpd_arcsec)
+
+    def truncate(self, n):
+        """Drop everything from index ``n`` on, after a cancel."""
+        self.values = self.values[:n]
+        self.hpd_arcsec = self.hpd_arcsec[:n]
+        self.rms_arcsec = self.rms_arcsec[:n]
+        self.throughput = self.throughput[:n]
+        self.collecting_area = self.collecting_area[:n]
+        self.num_surviving = self.num_surviving[:n]
+        self.completed = n
+
+    def to_csv(self, path):
+        """Write the sweep to a CSV file."""
+        label, unit = sweep_label(self.name)
+        header = ','.join([
+            '%s[%s]' % (self.name, unit) if unit else self.name,
+            'hpd_arcsec', 'rms_arcsec', 'throughput',
+            'collecting_area_cm2', 'rays_surviving'])
+        rows = [header]
+        for i in range(len(self.values)):
+            rows.append('%g,%g,%g,%g,%g,%d' % (
+                self.values[i], self.hpd_arcsec[i], self.rms_arcsec[i],
+                self.throughput[i], self.collecting_area[i],
+                self.num_surviving[i]))
+        with open(path, 'w') as handle:
+            handle.write('\n'.join(rows) + '\n')
+
+
+def sweep(params, name, start, stop, steps, progress=None, should_stop=None):
+    """
+    Trace the system repeatedly while varying one parameter.
+
+    This is the tolerancing workflow: how far can a mirror shift before the
+    image quality budget blows?
+
+    Parameters
+    ----------
+    params : WolterParams
+        Baseline configuration; every point starts from a copy of this.
+    name : str
+        Parameter to vary. Must appear in :data:`SWEEPABLE`.
+    start, stop : float
+        Range to sweep over, inclusive.
+    steps : int
+        Number of points.
+    progress : callable, optional
+        Called as ``progress(done, total)`` after each point.
+    should_stop : callable, optional
+        Polled before each point; return True to stop early.
+
+    Returns
+    -------
+    SweepResult
+        Metrics at each point, NaN where a point could not be traced.
+    """
+    sweep_label(name)  # validates the name
+    steps = max(2, int(steps))
+    values = np.linspace(float(start), float(stop), steps)
+    result = SweepResult(params, name, values)
+
+    for i, value in enumerate(values):
+        if should_stop is not None and should_stop():
+            result.truncate(i)
+            break
+
+        point = params.copy()
+        setattr(point, name, value)
+
+        try:
+            traced = trace(point, record_paths=False)
+        except ValueError as err:
+            # Guarded misalignment, or otherwise unusable input.
+            result.notes[i] = str(err)
+        else:
+            if traced.message:
+                result.notes[i] = traced.message
+            else:
+                result.hpd_arcsec[i] = traced.hpd_arcsec
+                result.rms_arcsec[i] = traced.rms_arcsec
+                result.throughput[i] = traced.throughput
+                result.collecting_area[i] = traced.collecting_area
+                result.num_surviving[i] = traced.num_surviving
+
+        result.completed = i + 1
+        if progress is not None:
+            progress(i + 1, steps)
+
+    return result
 
 
 def encircled_energy(result, num=200):
