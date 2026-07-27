@@ -13,6 +13,10 @@ subroutine tracezern(x,y,z,l,m,n,ux,uy,uz,num,coeff,rorder,aorder,arrsize,rad)
   real*8, intent(inout) :: x(num),y(num),z(num),l(num),m(num),n(num),ux(num),uy(num),uz(num)
   integer, intent(in) :: rorder(arrsize),aorder(arrsize)
   integer :: i,c
+  real*8 :: xi,yi,zi
+  integer :: counter
+  !Newton iteration cap -- see woltsurf.f95 woltersecondary for the rationale.
+  integer, parameter :: maxiter = 100
   real*8 :: F,Frho,Ftheta,Frhox,Frhoy,Fthetax,Fthetay,Fx,Fy,Fz,Fp,rho,theta,delta,t
   real*8 :: zern(arrsize),rhoder(arrsize),thetader(arrsize)
   real*8 :: zernike,zernrhoder,zernthetader
@@ -20,10 +24,15 @@ subroutine tracezern(x,y,z,l,m,n,ux,uy,uz,num,coeff,rorder,aorder,arrsize,rad)
 
   !Loop through each individual ray, trace to surface, and reflect
   !Establish convergence criteria (surface function should be < 1.e-12)
-  !$omp parallel do private(t,delta,rho,theta,F,Frho,Ftheta,Frhox,Frhoy,Fthetax,Fthetay,Fx,Fy,Fz,Fp,i,c,zern,rhoder,thetader)
+  !$omp parallel do private(t,delta,rho,theta,F,Frho,Ftheta,Frhox,Frhoy,Fthetax,Fthetay,Fx,Fy,Fz,Fp,i,c,zern,rhoder, &
+  !$omp                     thetader,counter,xi,yi,zi)
   do i=1,num
     t = 0.
     delta = 100.
+    counter = 0
+    xi = x(i)
+    yi = y(i)
+    zi = z(i)
     !count = 0
     !print *, x(i), y(i), z(i)
     !print *, l(i), m(i), n(i)
@@ -88,13 +97,27 @@ subroutine tracezern(x,y,z,l,m,n,ux,uy,uz,num,coeff,rorder,aorder,arrsize,rad)
       z(i) = z(i) + n(i)*delta
       !Keep track of total length ray is traced
       t = t + delta
+      counter = counter + 1
+      if (counter > maxiter .or. isnan(delta)) then
+        x(i) = xi
+        y(i) = yi
+        z(i) = zi
+        l(i) = 0.
+        m(i) = 0.
+        n(i) = 0.
+        t = 0.
+        counter = maxiter + 1
+        exit
+      end if
     end do
     !print *, "Number of iterations: ", count
     !We have converged, do any vignetting and compute surface normal
+    if (counter <= maxiter) then
     Fp = sqrt(Fx*Fx+Fy*Fy+Fz*Fz)
     ux(i) = Fx/Fp
     uy(i) = Fy/Fp
     uz(i) = Fz/Fp
+    end if
   end do
   !$omp end parallel do
 
@@ -113,6 +136,10 @@ subroutine tracezernOPD(opd,x,y,z,l,m,n,ux,uy,uz,num,coeff,rorder,aorder,arrsize
   real*8, intent(inout) :: opd(num),x(num),y(num),z(num),l(num),m(num),n(num),ux(num),uy(num),uz(num)
   integer, intent(in) :: rorder(arrsize),aorder(arrsize)
   integer :: i,c
+  real*8 :: xi,yi,zi
+  integer :: counter
+  !Newton iteration cap -- see woltsurf.f95 woltersecondary for the rationale.
+  integer, parameter :: maxiter = 100
   real*8 :: F,Frho,Ftheta,Frhox,Frhoy,Fthetax,Fthetay,Fx,Fy,Fz,Fp,rho,theta,delta,t
   real*8 :: zern(arrsize),rhoder(arrsize),thetader(arrsize)
   real*8 :: zernike,zernrhoder,zernthetader
@@ -120,10 +147,15 @@ subroutine tracezernOPD(opd,x,y,z,l,m,n,ux,uy,uz,num,coeff,rorder,aorder,arrsize
 
   !Loop through each individual ray, trace to surface, and reflect
   !Establish convergence criteria (surface function should be < 1.e-12)
-  !$omp parallel do private(t,delta,rho,theta,F,Frho,Ftheta,Frhox,Frhoy,Fthetax,Fthetay,Fx,Fy,Fz,Fp,i,c,zern,rhoder,thetader)
+  !$omp parallel do private(t,delta,rho,theta,F,Frho,Ftheta,Frhox,Frhoy,Fthetax,Fthetay,Fx,Fy,Fz,Fp,i,c,zern,rhoder, &
+  !$omp                     thetader,counter,xi,yi,zi)
   do i=1,num
     t = 0.
     delta = 100.
+    counter = 0
+    xi = x(i)
+    yi = y(i)
+    zi = z(i)
     !count = 0
     !print *, x(i), y(i), z(i)
     !print *, l(i), m(i), n(i)
@@ -188,13 +220,27 @@ subroutine tracezernOPD(opd,x,y,z,l,m,n,ux,uy,uz,num,coeff,rorder,aorder,arrsize
       z(i) = z(i) + n(i)*delta
       !Keep track of total length ray is traced
       t = t + delta
+      counter = counter + 1
+      if (counter > maxiter .or. isnan(delta)) then
+        x(i) = xi
+        y(i) = yi
+        z(i) = zi
+        l(i) = 0.
+        m(i) = 0.
+        n(i) = 0.
+        t = 0.
+        counter = maxiter + 1
+        exit
+      end if
     end do
     !print *, "Number of iterations: ", count
     !We have converged, do any vignetting and compute surface normal
+    if (counter <= maxiter) then
     Fp = sqrt(Fx*Fx+Fy*Fy+Fz*Fz)
     ux(i) = Fx/Fp
     uy(i) = Fy/Fp
     uz(i) = Fz/Fp
+    end if
     !Iterate OPD
     opd(i) = opd(i) + t*nr
   end do
@@ -263,6 +309,10 @@ subroutine tracezernrot(x,y,z,l,m,n,ux,uy,uz,num,coeff1,rorder1,aorder1,arrsize1
   integer, intent(in) :: rorder1(arrsize1),aorder1(arrsize1)
   integer, intent(in) :: rorder2(arrsize2),aorder2(arrsize2)
   integer :: i,c
+  real*8 :: xi,yi,zi
+  integer :: counter
+  !Newton iteration cap -- see woltsurf.f95 woltersecondary for the rationale.
+  integer, parameter :: maxiter = 100
   real*8 :: F,Frho,Ftheta,Frhox,Frhoy,Fthetax,Fthetay,Fx,Fy,Fz,Fp,rho,theta,delta,t
   real*8 :: zern1(arrsize1),rhoder1(arrsize1),thetader1(arrsize1)
   real*8 :: zern2(arrsize2),rhoder2(arrsize2),thetader2(arrsize2)
@@ -271,10 +321,15 @@ subroutine tracezernrot(x,y,z,l,m,n,ux,uy,uz,num,coeff1,rorder1,aorder1,arrsize1
 
   !Loop through each individual ray, trace to surface, and reflect
   !Establish convergence criteria (surface function should be < 1.e-12)
-  !$omp parallel do private(t,delta,rho,theta,F,Frho,Ftheta,Frhox,Frhoy,Fthetax,Fthetay,Fx,Fy,Fz,Fp,i,c,zern1,zern2)
+  !$omp parallel do private(t,delta,rho,theta,F,Frho,Ftheta,Frhox,Frhoy,Fthetax,Fthetay,Fx,Fy,Fz,Fp,i,c, &
+  !$omp                     zern1,zern2,counter,xi,yi,zi)
   do i=1,num
     t = 0.
     delta = 100.
+    counter = 0
+    xi = x(i)
+    yi = y(i)
+    zi = z(i)
     !count = 0
     !print *, x(i), y(i), z(i)
     !print *, l(i), m(i), n(i)
@@ -346,13 +401,27 @@ subroutine tracezernrot(x,y,z,l,m,n,ux,uy,uz,num,coeff1,rorder1,aorder1,arrsize1
       z(i) = z(i) + n(i)*delta
       !Keep track of total length ray is traced
       t = t + delta
+      counter = counter + 1
+      if (counter > maxiter .or. isnan(delta)) then
+        x(i) = xi
+        y(i) = yi
+        z(i) = zi
+        l(i) = 0.
+        m(i) = 0.
+        n(i) = 0.
+        t = 0.
+        counter = maxiter + 1
+        exit
+      end if
     end do
     !print *, "Number of iterations: ", count
     !We have converged, do any vignetting and compute surface normal
+    if (counter <= maxiter) then
     Fp = sqrt(Fx*Fx+Fy*Fy+Fz*Fz)
     ux(i) = Fx/Fp
     uy(i) = Fy/Fp
     uz(i) = Fz/Fp
+    end if
   end do
   !$omp end parallel do
 

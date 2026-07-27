@@ -256,15 +256,24 @@ subroutine cylconic(x,y,z,l,m,n,ux,uy,uz,num,rad,k)
   real*8, intent(in) :: rad,k
   real*8 :: low,high,dL,dH
   real*8 :: F,Fx,Fy,Fp,delt,dum
-  integer :: i
+  real*8 :: xi,yi,zi
+  integer :: i,counter
+  !Newton iteration cap -- see woltsurf.f95 woltersecondary for the rationale.
+  !A ray that gives up is marked dead by zeroing its direction cosines,
+  !which transformations.vignette drops.
+  integer, parameter :: maxiter = 100
 
   !Z derivative of surface function is 0 due to cylindrical symmetry
   !This is essentially a 2D problem
 
   !Loop through rays and trace to mirror
-  !$omp parallel do private(delt,F,Fx,Fy,Fp,low,high,dL,dH)
+  !$omp parallel do private(delt,F,Fx,Fy,Fp,low,high,dL,dH,counter,xi,yi,zi)
   do i=1,num
     delt = 100.
+    counter = 0
+    xi = x(i)
+    yi = y(i)
+    zi = z(i)
     do while(abs(delt)>1.e-10)
       low = 1 + sqrt(1 - (1+k)*rad**2*x(i)**2)
       high = rad*x(i)**2
@@ -278,15 +287,24 @@ subroutine cylconic(x,y,z,l,m,n,ux,uy,uz,num,rad,k)
       x(i) = x(i) + l(i)*delt
       y(i) = y(i) + m(i)*delt
       z(i) = z(i) + n(i)*delt
-      !print *, x(i),y(i),z(i)
-      !print *, F, Fp
-      !print * ,delt
-      !read *, dum
+      counter = counter + 1
+      if (counter > maxiter .or. isnan(delt)) then
+        x(i) = xi
+        y(i) = yi
+        z(i) = zi
+        l(i) = 0.
+        m(i) = 0.
+        n(i) = 0.
+        counter = maxiter + 1
+        exit
+      end if
     end do
+    if (counter <= maxiter) then
     Fp = sqrt(Fx*Fx+Fy*Fy)
     ux(i) = Fx/Fp
     uy(i) = Fy/Fp
     uz(i) = 0.
+    end if
     !print *, x(i),y(i),z(i)
     !print *, ux(i),uy(i),uz(i)
     !read *, dum
@@ -472,12 +490,21 @@ subroutine torus(x,y,z,l,m,n,ux,uy,uz,num,rin,rout)
   real*8 , intent(inout) :: x(num),y(num),z(num),l(num),m(num),n(num),ux(num),uy(num),uz(num)
   real*8, intent(in) :: rin,rout
   real*8 :: F,Fx,Fy,Fz,Fp,delt,dum
-  integer :: i
+  real*8 :: xi,yi,zi
+  integer :: i,counter
+  !Newton iteration cap -- see woltsurf.f95 woltersecondary for the rationale.
+  !A ray that gives up is marked dead by zeroing its direction cosines,
+  !which transformations.vignette drops.
+  integer, parameter :: maxiter = 100
 
   !Loop through rays and trace to mirror
-  !$omp parallel do private(delt,F,Fx,Fy,Fz,Fp)
+  !$omp parallel do private(delt,F,Fx,Fy,Fz,Fp,counter,xi,yi,zi)
   do i=1,num
     delt = 100.
+    counter = 0
+    xi = x(i)
+    yi = y(i)
+    zi = z(i)
     do while(abs(delt)>1.e-10)
       F = ((z(i)+rin+rout)**2+y(i)**2+x(i)**2+rout**2-rin**2)**2 - (4*rout**2*(y(i)**2+(z(i)+rin+rout)**2))
 
@@ -493,11 +520,24 @@ subroutine torus(x,y,z,l,m,n,ux,uy,uz,num,rin,rout)
       x(i) = x(i) + l(i)*delt
       y(i) = y(i) + m(i)*delt
       z(i) = z(i) + n(i)*delt
+      counter = counter + 1
+      if (counter > maxiter .or. isnan(delt)) then
+        x(i) = xi
+        y(i) = yi
+        z(i) = zi
+        l(i) = 0.
+        m(i) = 0.
+        n(i) = 0.
+        counter = maxiter + 1
+        exit
+      end if
     end do
+    if (counter <= maxiter) then
     Fp = sqrt(Fx*Fx+Fy*Fy)
     ux(i) = Fx/Fp
     uy(i) = Fy/Fp
     uz(i) = Fz/Fp
+    end if
     !print *, x(i),y(i),z(i)
     !print *, ux(i),uy(i),uz(i)
     !read *, dum
@@ -519,7 +559,12 @@ subroutine conicplus(x,y,z,l,m,n,ux,uy,uz,num,R,K,p,Np)
   real*8 , intent(inout) :: x(num),y(num),z(num),l(num),m(num),n(num),ux(num),uy(num),uz(num)
   real*8, intent(in) :: R,K
   real*8 :: c,delt,rad,a0,a1,F,Fr,Fx,Fy,Fz,Fp,denom,dum
-  integer :: i,j
+  real*8 :: xi,yi,zi,opdi
+  integer :: i,j,counter
+  !Newton iteration cap -- see woltsurf.f95 woltersecondary for the rationale.
+  !A ray that gives up is marked dead by zeroing its direction cosines,
+  !which transformations.vignette drops.
+  integer, parameter :: maxiter = 100
 
   !Trace to conic first, then perform Newton shooting?
   Fz = 1.
@@ -527,9 +572,13 @@ subroutine conicplus(x,y,z,l,m,n,ux,uy,uz,num,R,K,p,Np)
 
   !Implement Newton shooting
   !Loop through rays and trace to mirror
-  !$omp parallel do private(delt,rad,a0,a1,denom,j,F,Fr,Fx,Fy,Fp)
+  !$omp parallel do private(delt,rad,a0,a1,denom,j,F,Fr,Fx,Fy,Fp,counter,xi,yi,zi)
   do i=1,num
     delt = 100.
+    counter = 0
+    xi = x(i)
+    yi = y(i)
+    zi = z(i)
     do while(abs(delt)>1.e-10)
       !Compute summation terms
       rad = sqrt(x(i)**2+y(i)**2)
@@ -556,11 +605,24 @@ subroutine conicplus(x,y,z,l,m,n,ux,uy,uz,num,R,K,p,Np)
       x(i) = x(i) + l(i)*delt
       y(i) = y(i) + m(i)*delt
       z(i) = z(i) + n(i)*delt
+      counter = counter + 1
+      if (counter > maxiter .or. isnan(delt)) then
+        x(i) = xi
+        y(i) = yi
+        z(i) = zi
+        l(i) = 0.
+        m(i) = 0.
+        n(i) = 0.
+        counter = maxiter + 1
+        exit
+      end if
     end do
+    if (counter <= maxiter) then
     Fp = sqrt(Fx*Fx+Fy*Fy+Fz*Fz)
     ux(i) = Fx/Fp
     uy(i) = Fy/Fp
     uz(i) = Fz/Fp
+    end if
     !print *, x(i),y(i),z(i)
     !print *, ux(i),uy(i),uz(i)
     !read *, dum
@@ -583,7 +645,12 @@ subroutine conicplusopd(opd,x,y,z,l,m,n,ux,uy,uz,num,R,K,p,Np,nr)
   real*8 , intent(inout) :: opd(num),x(num),y(num),z(num),l(num),m(num),n(num),ux(num),uy(num),uz(num)
   real*8, intent(in) :: R,K,nr
   real*8 :: c,delt,rad,a0,a1,F,Fr,Fx,Fy,Fz,Fp,denom,dum
-  integer :: i,j
+  real*8 :: xi,yi,zi,opdi
+  integer :: i,j,counter
+  !Newton iteration cap -- see woltsurf.f95 woltersecondary for the rationale.
+  !A ray that gives up is marked dead by zeroing its direction cosines,
+  !which transformations.vignette drops.
+  integer, parameter :: maxiter = 100
 
   !Trace to conic first, then perform Newton shooting?
   Fz = 1.
@@ -591,9 +658,14 @@ subroutine conicplusopd(opd,x,y,z,l,m,n,ux,uy,uz,num,R,K,p,Np,nr)
 
   !Implement Newton shooting
   !Loop through rays and trace to mirror
-  !$omp parallel do private(delt,rad,a0,a1,denom,j,F,Fr,Fx,Fy,Fp)
+  !$omp parallel do private(delt,rad,a0,a1,denom,j,F,Fr,Fx,Fy,Fp,counter,xi,yi,zi)
   do i=1,num
     delt = 100.
+    counter = 0
+    xi = x(i)
+    yi = y(i)
+    zi = z(i)
+    opdi = opd(i)
     do while(abs(delt)>1.e-10)
       !Compute summation terms
       rad = sqrt(x(i)**2+y(i)**2)
@@ -623,11 +695,25 @@ subroutine conicplusopd(opd,x,y,z,l,m,n,ux,uy,uz,num,R,K,p,Np,nr)
       y(i) = y(i) + m(i)*delt
       z(i) = z(i) + n(i)*delt
       opd(i) = opd(i) + delt*nr
+      counter = counter + 1
+      if (counter > maxiter .or. isnan(delt)) then
+        x(i) = xi
+        y(i) = yi
+        z(i) = zi
+        opd(i) = opdi
+        l(i) = 0.
+        m(i) = 0.
+        n(i) = 0.
+        counter = maxiter + 1
+        exit
+      end if
     end do
+    if (counter <= maxiter) then
     Fp = sqrt(Fx*Fx+Fy*Fy+Fz*Fz)
     ux(i) = Fx/Fp
     uy(i) = Fy/Fp
     uz(i) = Fz/Fp
+    end if
     !print *, x(i),y(i),z(i)
     !print *, ux(i),uy(i),uz(i)
     !read *, dum

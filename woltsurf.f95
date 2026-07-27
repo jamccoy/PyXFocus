@@ -12,7 +12,12 @@ subroutine wolterprimary(x,y,z,l,m,n,ux,uy,uz,num,r0,z0,psi)
   real*8, intent(in) :: r0,z0,psi
   real*8 :: alpha,thetah,thetap,p,d,e
   real*8 :: F,Fx,Fy,Fz,Fp,delt,dum
-  integer :: i
+  real*8 :: xi,yi,zi
+  integer :: i,counter
+  !See woltersecondary below for why this cap exists and what maxiter=100
+  !is based on. A ray that gives up is marked dead by zeroing its direction
+  !cosines, which transformations.vignette drops.
+  integer, parameter :: maxiter = 100
 
   !Compute Van Speybroeck parameters
   alpha = .25*atan(r0/z0)
@@ -24,9 +29,13 @@ subroutine wolterprimary(x,y,z,l,m,n,ux,uy,uz,num,r0,z0,psi)
 
   Fz = 2*p
   !Loop through rays and trace to mirror
-  !$omp parallel do private(delt,F,Fx,Fy,Fp)
+  !$omp parallel do private(delt,F,Fx,Fy,Fp,counter,xi,yi,zi)
   do i=1,num
     delt = 100.
+    counter = 0
+    xi = x(i)
+    yi = y(i)
+    zi = z(i)
     do while(abs(delt)>1.e-8)
       F = 2*p*z(i) + p**2 + 4*e**2*p*d/(e**2-1) - x(i)**2 - y(i)**2
       Fx = -2.*x(i)
@@ -36,15 +45,24 @@ subroutine wolterprimary(x,y,z,l,m,n,ux,uy,uz,num,r0,z0,psi)
       x(i) = x(i) + l(i)*delt
       y(i) = y(i) + m(i)*delt
       z(i) = z(i) + n(i)*delt
-      !print *, x(i),y(i),z(i)
-      !print *, F
-      !print * ,delt
-      !read *, dum
+      counter = counter + 1
+      if (counter > maxiter .or. isnan(delt)) then
+        x(i) = xi
+        y(i) = yi
+        z(i) = zi
+        l(i) = 0.
+        m(i) = 0.
+        n(i) = 0.
+        counter = maxiter + 1
+        exit
+      end if
     end do
+    if (counter <= maxiter) then
     Fp = sqrt(Fx*Fx+Fy*Fy+Fz*Fz)
     ux(i) = Fx/Fp
     uy(i) = Fy/Fp
     uz(i) = Fz/Fp
+    end if
     !print *, x(i),y(i),z(i)
     !print *, ux(i),uy(i),uz(i)
     !read *, dum
@@ -65,7 +83,10 @@ subroutine wolterprimaryopd(opd,x,y,z,l,m,n,ux,uy,uz,num,r0,z0,psi,nr)
   real*8, intent(in) :: r0,z0,psi,nr
   real*8 :: alpha,thetah,thetap,p,d,e
   real*8 :: F,Fx,Fy,Fz,Fp,delt,dum
-  integer :: i
+  real*8 :: xi,yi,zi,opdi
+  integer :: i,counter
+  !See woltersecondary for the rationale behind this cap.
+  integer, parameter :: maxiter = 100
 
   !Compute Van Speybroeck parameters
   alpha = .25*atan(r0/z0)
@@ -77,9 +98,14 @@ subroutine wolterprimaryopd(opd,x,y,z,l,m,n,ux,uy,uz,num,r0,z0,psi,nr)
 
   Fz = 2*p
   !Loop through rays and trace to mirror
-  !$omp parallel do private(delt,F,Fx,Fy,Fp)
+  !$omp parallel do private(delt,F,Fx,Fy,Fp,counter,xi,yi,zi,opdi)
   do i=1,num
     delt = 100.
+    counter = 0
+    xi = x(i)
+    yi = y(i)
+    zi = z(i)
+    opdi = opd(i)
     do while(abs(delt)>1.e-10)
       F = 2*p*z(i) + p**2 + 4*e**2*p*d/(e**2-1) - x(i)**2 - y(i)**2
       Fx = -2.*x(i)
@@ -90,15 +116,25 @@ subroutine wolterprimaryopd(opd,x,y,z,l,m,n,ux,uy,uz,num,r0,z0,psi,nr)
       y(i) = y(i) + m(i)*delt
       z(i) = z(i) + n(i)*delt
       opd(i) = opd(i) + nr*delt
-      !print *, x(i),y(i),z(i)
-      !print *, F
-      !print * ,delt
-      !read *, dum
+      counter = counter + 1
+      if (counter > maxiter .or. isnan(delt)) then
+        x(i) = xi
+        y(i) = yi
+        z(i) = zi
+        opd(i) = opdi
+        l(i) = 0.
+        m(i) = 0.
+        n(i) = 0.
+        counter = maxiter + 1
+        exit
+      end if
     end do
+    if (counter <= maxiter) then
     Fp = sqrt(Fx*Fx+Fy*Fy+Fz*Fz)
     ux(i) = Fx/Fp
     uy(i) = Fy/Fp
     uz(i) = Fz/Fp
+    end if
     !print *, x(i),y(i),z(i)
     !print *, ux(i),uy(i),uz(i)
     !read *, dum
@@ -119,7 +155,18 @@ subroutine woltersecondary(x,y,z,l,m,n,ux,uy,uz,num,r0,z0,psi)
   real*8, intent(in) :: r0,z0,psi
   real*8 :: alpha,thetah,thetap,p,d,e
   real*8 :: F,Fx,Fy,Fz,Fp,delt,dum
-  integer :: i
+  real*8 :: xi,yi,zi
+  integer :: i,counter
+  !Cap the Newton iteration. Normal convergence takes 3-6 passes; wsprimary
+  !and wssecondary below already cap at 25. Without a cap a ray that cannot
+  !converge spins forever and hangs the caller with no error: for small
+  !r0/z0 the constant e**2-1 is a difference of near-equal doubles, so the
+  !smallest achievable step can sit above the 1.e-8 tolerance and the exit
+  !condition is never met.
+  !A ray that gives up is marked dead by zeroing its direction cosines, the
+  !convention transformationsf/grat uses for evanescent orders and that
+  !transformations.vignette tests for (l**2+m**2+n**2 < 0.1).
+  integer, parameter :: maxiter = 100
 
   !Compute Van Speybroeck parameters
   alpha = .25*atan(r0/z0)
@@ -130,9 +177,13 @@ subroutine woltersecondary(x,y,z,l,m,n,ux,uy,uz,num,r0,z0,psi)
   e = cos(4*alpha)*(1+tan(4*alpha)*tan(thetah))
 
   !Loop through rays and trace to mirror
-  !$omp parallel do private(delt,F,Fx,Fy,Fz,Fp)
+  !$omp parallel do private(delt,F,Fx,Fy,Fz,Fp,counter,xi,yi,zi)
   do i=1,num
     delt = 100.
+    counter = 0
+    xi = x(i)
+    yi = y(i)
+    zi = z(i)
     do while(abs(delt)>1.e-8)
       F = e**2*(d+z(i))**2 - z(i)**2 - x(i)**2 - y(i)**2
       Fx = -2.*x(i)
@@ -143,18 +194,29 @@ subroutine woltersecondary(x,y,z,l,m,n,ux,uy,uz,num,r0,z0,psi)
       x(i) = x(i) + l(i)*delt
       y(i) = y(i) + m(i)*delt
       z(i) = z(i) + n(i)*delt
-      !print *, x(i),y(i),z(i)
-      !print *, F, Fx, Fy, Fz
-      !print * ,delt
-      !read *, dum
+      counter = counter + 1
+      !isnan is a gfortran extension, already used elsewhere in this file.
+      !The standard-conforming equivalent is (delt /= delt).
+      if (counter > maxiter .or. isnan(delt)) then
+        !Restore the entry position so no Inf/NaN coordinate escapes.
+        x(i) = xi
+        y(i) = yi
+        z(i) = zi
+        l(i) = 0.
+        m(i) = 0.
+        n(i) = 0.
+        !Push counter past maxiter so the normal below is skipped even when
+        !we bailed on isnan during the first pass.
+        counter = maxiter + 1
+        exit
+      end if
     end do
-    Fp = sqrt(Fx*Fx+Fy*Fy+Fz*Fz)
-    ux(i) = Fx/Fp
-    uy(i) = Fy/Fp
-    uz(i) = Fz/Fp
-    !print *, x(i),y(i),z(i)
-    !print *, ux(i),uy(i),uz(i)
-    !read *, dum
+    if (counter <= maxiter) then
+      Fp = sqrt(Fx*Fx+Fy*Fy+Fz*Fz)
+      ux(i) = Fx/Fp
+      uy(i) = Fy/Fp
+      uz(i) = Fz/Fp
+    end if
   end do
   !$omp end parallel do
 
@@ -172,7 +234,10 @@ subroutine woltersine(x,y,z,l,m,n,ux,uy,uz,num,r0,z0,amp,freq)
   real*8, intent(in) :: r0,z0,amp,freq
   real*8 :: alpha,thetah,thetap,p,d,e
   real*8 :: F,Fx,Fy,Fz,Fp,delt,dum,rad
-  integer :: i
+  real*8 :: xi,yi,zi
+  integer :: i,counter
+  !See woltersecondary for the rationale behind this cap.
+  integer, parameter :: maxiter = 100
 
   !Compute Van Speybroeck parameters
   alpha = .25*atan(r0/z0)
@@ -183,9 +248,13 @@ subroutine woltersine(x,y,z,l,m,n,ux,uy,uz,num,r0,z0,amp,freq)
   e = cos(4*alpha)*(1+tan(4*alpha)*tan(thetah))
 
   !Loop through rays and trace to mirror
-  !$omp parallel do private(delt,F,Fx,Fy,Fz,Fp,rad)
+  !$omp parallel do private(delt,F,Fx,Fy,Fz,Fp,rad,counter,xi,yi,zi)
   do i=1,num
     delt = 100.
+    counter = 0
+    xi = x(i)
+    yi = y(i)
+    zi = z(i)
     do while(abs(delt)>1.e-10)
       rad = sqrt(x(i)**2+y(i)**2) + amp*sin(2*acos(-1.)*freq*z(i))
       F = 2*p*z(i) + p**2 + 4*e**2*p*d/(e**2-1) - rad**2
@@ -197,15 +266,24 @@ subroutine woltersine(x,y,z,l,m,n,ux,uy,uz,num,r0,z0,amp,freq)
       x(i) = x(i) + l(i)*delt
       y(i) = y(i) + m(i)*delt
       z(i) = z(i) + n(i)*delt
-      !print *, x(i),y(i),z(i)
-      !print *, F
-      !print * ,delt
-      !read *, dum
+      counter = counter + 1
+      if (counter > maxiter .or. isnan(delt)) then
+        x(i) = xi
+        y(i) = yi
+        z(i) = zi
+        l(i) = 0.
+        m(i) = 0.
+        n(i) = 0.
+        counter = maxiter + 1
+        exit
+      end if
     end do
+    if (counter <= maxiter) then
     Fp = sqrt(Fx*Fx+Fy*Fy+Fz*Fz)
     ux(i) = Fx/Fp
     uy(i) = Fy/Fp
     uz(i) = Fz/Fp
+    end if
     !print *, x(i),y(i),z(i)
     !print *, ux(i),uy(i),uz(i)
     !read *, dum
@@ -226,7 +304,10 @@ subroutine wolterprimLL(x,y,z,l,m,n,ux,uy,uz,num,r0,z0,zmax,zmin,dphi,coeff,axia
   integer, intent(in) :: axial(cnum),az(cnum)
   real*8 :: alpha,thetah,thetap,p,d,e
   real*8 :: F,Fx,Fy,Fz,Fp,delt,dum,rad,add,addx,addy,addz,G
-  integer :: i,a
+  real*8 :: xi,yi,zi
+  integer :: i,a,counter
+  !See woltersecondary for the rationale behind this cap.
+  integer, parameter :: maxiter = 100
   real*8 :: pi,legendre,legendrep,zarg,targ,ang
 
   !Compute Van Speybroeck parameters
@@ -239,9 +320,13 @@ subroutine wolterprimLL(x,y,z,l,m,n,ux,uy,uz,num,r0,z0,zmax,zmin,dphi,coeff,axia
   e = cos(4*alpha)*(1+tan(4*alpha)*tan(thetah))
 
   !Loop through rays and trace to mirror
-  !$omp parallel do private(delt,F,Fx,Fy,Fz,Fp,rad,ang,zarg,targ,add,addx,addy,addz,a,G)
+  !$omp parallel do private(delt,F,Fx,Fy,Fz,Fp,rad,ang,zarg,targ,add,addx,addy,addz,a,G,counter,xi,yi,zi)
   do i=1,num
     delt = 100.
+    counter = 0
+    xi = x(i)
+    yi = y(i)
+    zi = z(i)
     do while(abs(delt)>1.e-10)
       ang = atan2(y(i),x(i))
       zarg = (z(i)-((zmax+zmin)/2.)) / ((zmax-zmin)/2.)
@@ -268,11 +353,24 @@ subroutine wolterprimLL(x,y,z,l,m,n,ux,uy,uz,num,r0,z0,zmax,zmin,dphi,coeff,axia
       x(i) = x(i) + l(i)*delt
       y(i) = y(i) + m(i)*delt
       z(i) = z(i) + n(i)*delt
+      counter = counter + 1
+      if (counter > maxiter .or. isnan(delt)) then
+        x(i) = xi
+        y(i) = yi
+        z(i) = zi
+        l(i) = 0.
+        m(i) = 0.
+        n(i) = 0.
+        counter = maxiter + 1
+        exit
+      end if
     end do
+    if (counter <= maxiter) then
     Fp = sqrt(Fx*Fx+Fy*Fy+Fz*Fz)
     ux(i) = Fx/Fp
     uy(i) = Fy/Fp
     uz(i) = Fz/Fp
+    end if
     !Set rays outside mirror definition to NaN
     !if (abs(zarg)>1 .or. abs(targ) > 1) then
     !  x(i) = 0.
@@ -299,7 +397,10 @@ subroutine woltersecLL(x,y,z,l,m,n,ux,uy,uz,num,r0,z0,psi,zmax,zmin,dphi,coeff,a
   integer, intent(in) :: axial(cnum),az(cnum)
   real*8 :: alpha,thetah,thetap,p,d,e
   real*8 :: F,Fx,Fy,Fz,Fp,delt,dum,rad,add,addx,addy,addz,G
-  integer :: i,a
+  real*8 :: xi,yi,zi
+  integer :: i,a,counter
+  !See woltersecondary for the rationale behind this cap.
+  integer, parameter :: maxiter = 100
   real*8 :: pi,legendre,legendrep,zarg,targ,ang
 
   !Compute Van Speybroeck parameters
@@ -355,15 +456,24 @@ subroutine woltersecLL(x,y,z,l,m,n,ux,uy,uz,num,r0,z0,psi,zmax,zmin,dphi,coeff,a
       x(i) = x(i) + l(i)*delt
       y(i) = y(i) + m(i)*delt
       z(i) = z(i) + n(i)*delt
-      !print *, x(i),y(i),z(i)
-      !print *, F
-      !print * ,delt
-      !read *, dum
+      counter = counter + 1
+      if (counter > maxiter .or. isnan(delt)) then
+        x(i) = xi
+        y(i) = yi
+        z(i) = zi
+        l(i) = 0.
+        m(i) = 0.
+        n(i) = 0.
+        counter = maxiter + 1
+        exit
+      end if
     end do
+    if (counter <= maxiter) then
     Fp = sqrt(Fx*Fx+Fy*Fy+Fz*Fz)
     ux(i) = Fx/Fp
     uy(i) = Fy/Fp
     uz(i) = Fz/Fp
+    end if
     !Set rays outside mirror definition to NaN
     !if (abs(zarg)>1 .or. abs(targ) > 1) then
     !  x(i) = 0.
@@ -401,7 +511,10 @@ subroutine wsprimary(x,y,z,l,m,n,ux,uy,uz,num,alpha,z0,psi)
   k = tan(betas/2)**2
 
   !Loop through rays and trace to mirror
-  !$omp parallel do private(i,delt,F,Fx,Fy,Fz,Fp,Fb,kterm,beta,dbdx,dbdy,flag,r,xi,yi,zi)
+  !c is the iteration counter used by the bail-out below; without it in the
+  !private list all threads share one counter and rays are killed or spared
+  !at random. wssecondary already lists it.
+  !$omp parallel do private(i,delt,F,Fx,Fy,Fz,Fp,Fb,kterm,beta,dbdx,dbdy,flag,r,xi,yi,zi,c)
   do i=1,num
     delt = 100.
     c = 0
@@ -649,7 +762,10 @@ subroutine ellipsoidWoltLL(x,y,z,l,m,n,ux,uy,uz,num,r0,z0,psi,S,zmax,zmin,dphi,c
   integer, intent(in) :: axial(cnum),az(cnum)
   real*8 :: P,ff,bq,cq,aa,bb,e
   real*8 :: F,Fx,Fy,Fz,Fp,delt,dum,rad,add,addx,addy,addz,G
-  integer :: i,a
+  real*8 :: xi,yi,zi
+  integer :: i,a,counter
+  !See woltersecondary for the rationale behind this cap.
+  integer, parameter :: maxiter = 100
   real*8 :: pi,legendre,legendrep,zarg,targ,ang,dummy,zfoc
 
   !Compute telescope parameters
@@ -664,9 +780,13 @@ subroutine ellipsoidWoltLL(x,y,z,l,m,n,ux,uy,uz,num,r0,z0,psi,S,zmax,zmin,dphi,c
   zfoc = ff-P+z0
 
   !Loop through rays and trace to mirror
-  !$omp parallel do private(delt,F,Fx,Fy,Fz,Fp,rad,ang,zarg,targ,add,addx,addy,addz,a,G)
+  !$omp parallel do private(delt,F,Fx,Fy,Fz,Fp,rad,ang,zarg,targ,add,addx,addy,addz,a,G,counter,xi,yi,zi)
   do i=1,num
     delt = 100.
+    counter = 0
+    xi = x(i)
+    yi = y(i)
+    zi = z(i)
     do while(abs(delt)>1.e-10)
       ang = atan2(y(i),x(i))
       zarg = (z(i)-((zmax+zmin)/2.)) / ((zmax-zmin)/2.)
@@ -698,11 +818,24 @@ subroutine ellipsoidWoltLL(x,y,z,l,m,n,ux,uy,uz,num,r0,z0,psi,S,zmax,zmin,dphi,c
       x(i) = x(i) + l(i)*delt
       y(i) = y(i) + m(i)*delt
       z(i) = z(i) + n(i)*delt
+      counter = counter + 1
+      if (counter > maxiter .or. isnan(delt)) then
+        x(i) = xi
+        y(i) = yi
+        z(i) = zi
+        l(i) = 0.
+        m(i) = 0.
+        n(i) = 0.
+        counter = maxiter + 1
+        exit
+      end if
     end do
+    if (counter <= maxiter) then
     Fp = sqrt(Fx*Fx+Fy*Fy+Fz*Fz)
     ux(i) = Fx/Fp
     uy(i) = Fy/Fp
     uz(i) = Fz/Fp
+    end if
     !Set rays outside mirror definition to NaN
     !if (abs(zarg)>1 .or. abs(targ) > 1) then
     !  x(i) = 0.
@@ -740,7 +873,8 @@ subroutine wsprimaryBack(x,y,z,l,m,n,ux,uy,uz,num,alpha,z0,psi,thick)
   k = tan(betas/2)**2
 
   !Loop through rays and trace to mirror
-  !$omp parallel do private(i,delt,F,Fx,Fy,Fz,Fp,Fb,kterm,beta,dbdx,dbdy,flag,r,x2,y2,theta,xi,yi,zi)
+  !c must be private -- see wsprimary above.
+  !$omp parallel do private(i,delt,F,Fx,Fy,Fz,Fp,Fb,kterm,beta,dbdx,dbdy,flag,r,x2,y2,theta,xi,yi,zi,c)
   do i=1,num
     delt = 100.
     c = 0
