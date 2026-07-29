@@ -155,6 +155,51 @@ def test_sweep_csv_roundtrip(tmp_path=None):
     assert lines[0].startswith('sec_dy[mm]'), 'unexpected header: %s' % lines[0]
 
 
+def test_nonconvergence_is_counted_not_silently_vignetted():
+    """
+    Solver failures are reported, not disguised as geometric misses.
+
+    r0=5mm is ill-conditioned enough that most rays hit the iteration cap.
+    Before the cap existed this hung; before the counting existed the dead
+    rays were absorbed by the mirror-extent test and quietly reported as
+    rays that missed the mirror, which understated throughput with no hint
+    that anything had gone wrong.
+    """
+    from PyXFocus.gui.wolter import WolterParams, trace
+    result = trace(WolterParams(r0=5., num_rays=2000))
+    assert result.num_nonconverged > 0, 'expected solver failures at r0=5'
+    assert result.metrics_are_bounds, 'metrics should be flagged as bounds'
+    assert result.warnings, 'a non-converged trace must warn'
+    assert 'lower bound' in ' '.join(result.warnings)
+    total = (result.num_surviving + result.num_nonconverged
+             + result.num_nonfinite)
+    assert total <= result.num_launched, 'accounting exceeds rays launched'
+
+
+def test_clean_trace_reports_no_nonconvergence():
+    """A well-conditioned system must not raise false alarms."""
+    from PyXFocus.gui.wolter import WolterParams, trace
+    result = trace(WolterParams(num_rays=5000))
+    assert result.num_nonconverged == 0
+    assert result.num_nonfinite == 0
+    assert not result.metrics_are_bounds
+    assert result.warnings == []
+
+
+def test_sweep_records_nonconvergence():
+    """A sweep carries the per-point non-convergence count into its CSV."""
+    import os
+    import tempfile
+    from PyXFocus.gui.wolter import WolterParams, sweep
+    result = sweep(WolterParams(num_rays=1000), 'r0', 3., 60., 8)
+    assert (result.nonconverged > 0).any(), 'expected degraded points'
+    path = os.path.join(tempfile.mkdtemp(), 'sweep.csv')
+    result.to_csv(path)
+    lines = open(path).read().strip().split('\n')
+    assert lines[0].endswith('rays_nonconverged'), lines[0]
+    assert len(lines) == 9
+
+
 def test_collecting_area_is_geometric_only():
     """Collecting area is aperture x throughput, with no reflectivity in it."""
     from PyXFocus.gui.wolter import WolterParams, trace

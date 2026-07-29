@@ -141,25 +141,38 @@ class MetricsBar(QtWidgets.QWidget):
                                     'upper bound rather than a true '
                                     'effective area.'),
         ('focus', 'Focus z', 'Axial position of best focus'),
+        ('nonconv', 'Non-converged',
+         'Rays the Fortran surface solver gave up on. They are NOT '
+         'geometric misses. Being excluded from every metric, they make '
+         'throughput and collecting area lower bounds rather than values.'),
     ]
+
+    #: Captions greyed by default; recoloured when the metrics are bounds.
+    GREY = 'color: gray; font-size: 10px;'
+    AMBER = 'color: #b8860b; font-size: 10px; font-weight: bold;'
+    VALUE = 'font-size: 15px; font-weight: bold;'
+    VALUE_BAD = 'font-size: 15px; font-weight: bold; color: #c0392b;'
 
     def __init__(self, parent=None):
         super(MetricsBar, self).__init__(parent)
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         self._values = {}
+        self._captions = {}
         for key, label, tip in self.FIELDS:
             box = QtWidgets.QVBoxLayout()
             caption = QtWidgets.QLabel(label)
-            caption.setStyleSheet('color: gray; font-size: 10px;')
+            caption.setStyleSheet(self.GREY)
             value = QtWidgets.QLabel('—')
-            value.setStyleSheet('font-size: 15px; font-weight: bold;')
+            value.setStyleSheet(self.VALUE)
             caption.setToolTip(tip)
             value.setToolTip(tip)
             box.addWidget(caption)
             box.addWidget(value)
             layout.addLayout(box)
             self._values[key] = value
+            self._captions[key] = label
+            self._captions[key + '_widget'] = caption
         layout.addStretch(1)
 
     def update_metrics(self, result):
@@ -168,13 +181,35 @@ class MetricsBar(QtWidgets.QWidget):
         v['rms'].setText('%.4f"' % result.rms_arcsec)
         v['rays'].setText('%d / %d' % (result.num_surviving,
                                        result.num_launched))
-        v['throughput'].setText('%.1f%%' % (100. * result.throughput))
-        v['area'].setText('%.2f cm²' % result.collecting_area)
         v['focus'].setText('%.4f mm' % result.focus_z)
 
+        # Rays lost to non-convergence are excluded from the counts above,
+        # so say so rather than letting a bound read as a measurement.
+        bounds = result.metrics_are_bounds
+        prefix = '≥ ' if bounds else ''
+        v['throughput'].setText('%s%.1f%%' % (prefix, 100. * result.throughput))
+        v['area'].setText('%s%.2f cm²' % (prefix, result.collecting_area))
+
+        lost = result.num_nonconverged
+        if lost:
+            v['nonconv'].setText('%d (%.1f%%)'
+                                 % (lost, 100. * lost
+                                    / max(result.num_launched, 1)))
+            v['nonconv'].setStyleSheet(self.VALUE_BAD)
+        else:
+            v['nonconv'].setText('0')
+            v['nonconv'].setStyleSheet(self.VALUE)
+
+        for key in ('throughput', 'area'):
+            self._captions[key + '_widget'].setStyleSheet(
+                self.AMBER if bounds else self.GREY)
+
     def clear(self):
-        for value in self._values.values():
+        for key, value in self._values.items():
             value.setText('—')
+            value.setStyleSheet(self.VALUE)
+        for key in ('throughput', 'area'):
+            self._captions[key + '_widget'].setStyleSheet(self.GREY)
 
 
 class SweepWorker(QtCore.QThread):
@@ -356,7 +391,19 @@ class SweepTab(QtWidgets.QWidget):
         good = result.valid
 
         self.ax.plot(result.values[good], result.hpd_arcsec[good],
-                     color='#1f77b4', lw=1.8, marker='o', ms=3, label='HPD')
+                     color='#1f77b4', lw=1.8, label='HPD')
+
+        # Split the markers: a point where rays failed to converge is a
+        # lower bound, not a measurement, so it must not look like one.
+        degraded = good & (result.nonconverged > 0)
+        solid = good & ~degraded
+        self.ax.plot(result.values[solid], result.hpd_arcsec[solid],
+                     ls='none', marker='o', ms=3, color='#1f77b4')
+        if degraded.any():
+            self.ax.plot(result.values[degraded], result.hpd_arcsec[degraded],
+                         ls='none', marker='o', ms=5, mfc='none',
+                         mec='#c0392b', mew=1.2,
+                         label='non-converged (bound)')
         self.ax2.plot(result.values[good], 100. * result.throughput[good],
                       color='#7f7f7f', lw=1.2, ls='--', label='Throughput')
 
@@ -685,9 +732,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.metrics.update_metrics(result)
         self.tabs.draw_all(result)
-        self.statusBar().showMessage(
-            'Traced %d rays — HPD %.4f arcsec'
-            % (result.num_launched, result.hpd_arcsec))
+        status = ('Traced %d rays — HPD %.4f arcsec'
+                  % (result.num_launched, result.hpd_arcsec))
+        if result.warnings:
+            status += '  ⚠ ' + ' '.join(result.warnings)
+        self.statusBar().showMessage(status)
 
     def _on_failed(self, message):
         self.trace_button.setEnabled(True)

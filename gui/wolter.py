@@ -149,10 +149,41 @@ class TraceResult(object):
         self.num_surviving = 0
         self.geometric_area = 0.
         self.message = ''
+        #: Rays the Fortran surface solver gave up on, per surface.  These
+        #: are not geometric misses -- the solver hit its iteration cap and
+        #: marked the ray dead.  Counted before the mirror-extent test so
+        #: they are never mistaken for rays that simply missed.
+        self.nonconverged_primary = 0
+        self.nonconverged_secondary = 0
+        #: Rays dropped for carrying a non-finite coordinate.
+        self.num_nonfinite = 0
+        #: Human-readable caveats about the numbers below.
+        self.warnings = []
+
+    @property
+    def num_nonconverged(self):
+        """Total rays lost to solver non-convergence."""
+        return self.nonconverged_primary + self.nonconverged_secondary
+
+    @property
+    def metrics_are_bounds(self):
+        """
+        True when rays were lost to non-convergence rather than geometry.
+
+        Those rays are excluded from every metric, so throughput and
+        collecting area understate the real system: they are lower bounds,
+        not measurements.
+        """
+        return self.num_nonconverged > 0 or self.num_nonfinite > 0
 
     @property
     def throughput(self):
-        """Fraction of launched rays that made it through both mirrors."""
+        """
+        Fraction of launched rays that made it through both mirrors.
+
+        Rays the solver failed to converge on count as lost, so when
+        :attr:`metrics_are_bounds` is set this is a lower bound.
+        """
         if self.num_launched == 0:
             return 0.
         return float(self.num_surviving) / self.num_launched
@@ -172,6 +203,9 @@ class TraceResult(object):
         Turning it into a true effective area needs a coating reflectivity
         table indexed by graze angle and energy; ``analyses.grazeAngle``
         already supplies the per-ray graze angles.
+
+        Like :attr:`throughput`, this is a lower bound whenever
+        :attr:`metrics_are_bounds` is set.
         """
         return self.geometric_area * self.throughput
 
@@ -250,6 +284,11 @@ def trace(params, record_paths=True, num_paths=40):
 
     # --- Primary ---
     surf.wolterprimary(rays, params.r0, params.z0, psi=params.psi)
+    rays, result.nonconverged_primary = _drop_dead(rays)
+    if len(rays[1]) == 0:
+        result.message = ('The surface solver failed to converge on the '
+                          'primary for every ray.')
+        return result
     tran.reflect(rays)
     ind = np.logical_and(rays[3] > params.z0,
                          rays[3] < params.z0 + params.primary_length)
@@ -264,6 +303,12 @@ def trace(params, record_paths=True, num_paths=40):
     misalign = params.misalignment()
     tran.transform(rays, *misalign)
     surf.woltersecondary(rays, params.r0, params.z0, psi=params.psi)
+    rays, result.nonconverged_secondary = _drop_dead(rays)
+    if len(rays[1]) == 0:
+        tran.itransform(rays, *misalign)
+        result.message = ('The surface solver failed to converge on the '
+                          'secondary for every ray.')
+        return result
     tran.reflect(rays)
     tran.itransform(rays, *misalign)
 
@@ -278,6 +323,7 @@ def trace(params, record_paths=True, num_paths=40):
 
     # Drop any ray that picked up a non-finite position.
     good = np.isfinite(rays[1]) & np.isfinite(rays[2]) & np.isfinite(rays[3])
+    result.num_nonfinite = int((~good).sum())
     if not good.all():
         rays = tran.vignette(rays, ind=good)
     if len(rays[1]) == 0:
@@ -299,7 +345,55 @@ def trace(params, record_paths=True, num_paths=40):
     if record_paths:
         result.path_z, result.path_r = _stack_paths(paths)
 
+    _add_warnings(result)
     return result
+
+
+def _add_warnings(result):
+    """Spell out, in words, when the metrics are bounds rather than values."""
+    lost = result.num_nonconverged
+    if lost:
+        where = []
+        if result.nonconverged_primary:
+            where.append('%d on the primary' % result.nonconverged_primary)
+        if result.nonconverged_secondary:
+            where.append('%d on the secondary' % result.nonconverged_secondary)
+        result.warnings.append(
+            '%d of %d rays (%.1f%%) did not converge (%s). They are excluded '
+            'from every metric, so throughput and collecting area are lower '
+            'bounds.'
+            % (lost, result.num_launched,
+               100. * lost / max(result.num_launched, 1), ', '.join(where)))
+    if result.num_nonfinite:
+        result.warnings.append(
+            '%d rays were dropped for non-finite coordinates.'
+            % result.num_nonfinite)
+
+
+def _drop_dead(rays):
+    """
+    Remove rays the Fortran solver gave up on, and count them.
+
+    The solver marks a non-converged ray by zeroing its direction cosines
+    (see the iteration caps in ``woltsurf.f95``).  They must be removed
+    here, immediately after the surface call, for two reasons:
+
+    * Left in, they are swallowed by the mirror-extent test further down
+      and silently counted as rays that *missed the mirror*.  That is a
+      different physical statement and it quietly corrupts throughput.
+    * ``analyses.analyticImagePlane`` computes ``x*l/n``.  A dead ray has
+      ``n = 0``, so one survivor is enough to turn ``focus_z`` -- and every
+      metric derived from it -- into NaN.
+
+    Returns
+    -------
+    (rays, ndead)
+    """
+    alive = rays[4] ** 2 + rays[5] ** 2 + rays[6] ** 2 >= 0.1
+    ndead = int((~alive).sum())
+    if ndead:
+        rays = tran.vignette(rays, ind=alive)
+    return rays, ndead
 
 
 def _sample(rays, num):
@@ -392,6 +486,9 @@ class SweepResult(object):
         self.throughput = np.full(n, np.nan)
         self.collecting_area = np.full(n, np.nan)
         self.num_surviving = np.zeros(n, dtype=int)
+        #: Rays lost to solver non-convergence at each point. Where this is
+        #: nonzero the metrics at that point are lower bounds.
+        self.nonconverged = np.zeros(n, dtype=int)
         self.notes = {}
         self.completed = 0
 
@@ -413,6 +510,7 @@ class SweepResult(object):
         self.throughput = self.throughput[:n]
         self.collecting_area = self.collecting_area[:n]
         self.num_surviving = self.num_surviving[:n]
+        self.nonconverged = self.nonconverged[:n]
         self.completed = n
 
     def to_csv(self, path):
@@ -421,13 +519,13 @@ class SweepResult(object):
         header = ','.join([
             '%s[%s]' % (self.name, unit) if unit else self.name,
             'hpd_arcsec', 'rms_arcsec', 'throughput',
-            'collecting_area_cm2', 'rays_surviving'])
+            'collecting_area_cm2', 'rays_surviving', 'rays_nonconverged'])
         rows = [header]
         for i in range(len(self.values)):
-            rows.append('%g,%g,%g,%g,%g,%d' % (
+            rows.append('%g,%g,%g,%g,%g,%d,%d' % (
                 self.values[i], self.hpd_arcsec[i], self.rms_arcsec[i],
                 self.throughput[i], self.collecting_area[i],
-                self.num_surviving[i]))
+                self.num_surviving[i], self.nonconverged[i]))
         with open(path, 'w') as handle:
             handle.write('\n'.join(rows) + '\n')
 
@@ -486,6 +584,7 @@ def sweep(params, name, start, stop, steps, progress=None, should_stop=None):
                 result.throughput[i] = traced.throughput
                 result.collecting_area[i] = traced.collecting_area
                 result.num_surviving[i] = traced.num_surviving
+                result.nonconverged[i] = traced.num_nonconverged
 
         result.completed = i + 1
         if progress is not None:
