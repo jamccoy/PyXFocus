@@ -19,6 +19,9 @@ Geometry convention (inherited from PyXFocus):
     * The secondary spans z0 - secondary_length -> z0.
 """
 
+import collections
+import math
+
 import numpy as np
 
 import PyXFocus.analyses as anal
@@ -128,6 +131,73 @@ class WolterParams(object):
         new = WolterParams()
         new.__dict__.update(self.__dict__)
         return new
+
+    def to_dict(self):
+        """
+        Parameters as plain JSON-ready values, in a stable field order.
+
+        Deliberately Qt-free so configurations can be written and read from
+        a script or a notebook, not only from the GUI.
+        """
+        out = collections.OrderedDict()
+        for name in PARAM_FIELDS:
+            value = getattr(self, name)
+            out[name] = int(value) if name in _INT_FIELDS else float(value)
+        return out
+
+    @classmethod
+    def from_dict(cls, data, problems=None):
+        """
+        Build from a dict, defaulting anything absent or unusable.
+
+        Parameters
+        ----------
+        data : dict
+            Field values. Extra keys are ignored rather than assigned --
+            a typo like ``sec_dyy`` must not become a silent attribute.
+        problems : list, optional
+            Human-readable notes are appended here. Nothing raises: one bad
+            field should cost you that field, not the whole configuration.
+            A caller wanting strictness inspects the list itself.
+
+        Returns
+        -------
+        WolterParams
+        """
+        if problems is None:
+            problems = []
+        params = cls()
+
+        if not isinstance(data, dict):
+            problems.append('parameters must be a mapping; using defaults')
+            return params
+
+        for key in sorted(data):
+            if key not in _SPEC_BY_NAME:
+                problems.append('ignored unknown parameter %r' % key)
+
+        for name in PARAM_FIELDS:
+            if name not in data:
+                problems.append('%s missing; using default %g'
+                                % (name, getattr(params, name)))
+                continue
+            raw = data[name]
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                problems.append('%s is not a number (%r); using default'
+                                % (name, raw))
+                continue
+            # json.loads accepts bare NaN and Infinity, and a spin box turns
+            # NaN into its *maximum* without complaint -- which would read
+            # back as a deliberate extreme. Refuse them here instead.
+            if not math.isfinite(value):
+                problems.append('%s is not finite (%r); using default'
+                                % (name, raw))
+                continue
+            setattr(params, name, int(value) if name in _INT_FIELDS else value)
+
+        return params
 
 
 class TraceResult(object):
@@ -437,6 +507,73 @@ def mirror_profile(params, num=200):
     zs = np.linspace(params.z0 - params.secondary_length, params.z0, num)
     rs = conic.secrad(zs, params.r0, params.z0, psi=params.psi)
     return (zp, rp), (zs, rs)
+
+
+#: One tunable parameter: how it is labelled, its range, and how finely it
+#: is edited.  ``lo``/``hi`` are None for parameters a configuration carries
+#: but the panel gives no field of its own (currently just ``seed``).
+ParamSpec = collections.namedtuple(
+    'ParamSpec', 'name label unit default lo hi decimals step')
+
+#: Every parameter the explorer exposes, in panel order.
+#:
+#: This lives here rather than inside the Qt widget that draws it so that
+#: anything Qt-free -- the config loader, the presets, the tests -- can
+#: validate against the same ranges the fields enforce.  A value a file
+#: offers and a value a spin box will accept then cannot drift apart.
+#: ``wolter`` already owns display metadata (see SWEEPABLE below), so this
+#: follows the module's existing habit rather than introducing a new one.
+PARAM_SPECS = (
+    ParamSpec('r0', 'Shell radius r₀', 'mm', 220., 1., 5000., 3, 5.),
+    ParamSpec('z0', 'Focal length z₀', 'mm', 8400., 100., 100000., 1, 100.),
+    ParamSpec('primary_length', 'Primary length', 'mm', 100., 1., 2000., 1, 10.),
+    ParamSpec('secondary_length', 'Secondary length', 'mm', 100., 1., 2000., 1, 10.),
+    ParamSpec('psi', 'Prescription ψ', '', 1., 0.1, 10., 3, 0.1),
+
+    ParamSpec('offaxis', 'Off-axis angle', 'arcmin', 0., 0., 120., 3, 0.5),
+    ParamSpec('azimuth', 'Azimuth', 'deg', 0., 0., 360., 1, 15.),
+    ParamSpec('num_rays', 'Number of rays', '', 20000., 100., 500000., 0, 5000.),
+
+    #: Misalignment ranges are capped by the backend's safe limits --
+    #: see check_misalignment for why those limits exist.
+    ParamSpec('sec_dx', 'Shift x', 'mm', 0.,
+              -MAX_TRANSLATION_MM, MAX_TRANSLATION_MM, 4, 0.01),
+    ParamSpec('sec_dy', 'Shift y', 'mm', 0.,
+              -MAX_TRANSLATION_MM, MAX_TRANSLATION_MM, 4, 0.01),
+    ParamSpec('sec_dz', 'Shift z', 'mm', 0.,
+              -MAX_TRANSLATION_MM, MAX_TRANSLATION_MM, 4, 0.01),
+    ParamSpec('sec_rx', 'Tilt about x', 'arcmin', 0.,
+              -MAX_ROTATION_ARCMIN, MAX_ROTATION_ARCMIN, 4, 0.05),
+    ParamSpec('sec_ry', 'Tilt about y', 'arcmin', 0.,
+              -MAX_ROTATION_ARCMIN, MAX_ROTATION_ARCMIN, 4, 0.05),
+    ParamSpec('sec_rz', 'Tilt about z', 'arcmin', 0.,
+              -MAX_ROTATION_ARCMIN, MAX_ROTATION_ARCMIN, 4, 0.05),
+
+    #: Carried through configurations but given no field, so that a saved
+    #: seed survives a round trip instead of silently reverting to 0.
+    ParamSpec('seed', 'Random seed', '', 0, None, None, 0, 1),
+)
+
+#: How the panel groups the fields, as (heading, parameter names).
+PARAM_GROUPS = (
+    ('Geometry', ('r0', 'z0', 'primary_length', 'secondary_length', 'psi')),
+    ('Source', ('offaxis', 'azimuth', 'num_rays')),
+    ('Secondary misalignment', ('sec_dx', 'sec_dy', 'sec_dz',
+                                'sec_rx', 'sec_ry', 'sec_rz')),
+)
+
+#: Field names carried in a saved configuration, in a stable order.
+PARAM_FIELDS = tuple(spec.name for spec in PARAM_SPECS)
+
+#: Fields stored as integers rather than floats.
+_INT_FIELDS = frozenset(('num_rays', 'seed'))
+
+_SPEC_BY_NAME = dict((spec.name, spec) for spec in PARAM_SPECS)
+
+
+def param_spec(name):
+    """The :class:`ParamSpec` for ``name``."""
+    return _SPEC_BY_NAME[name]
 
 
 #: Parameters a sweep can vary: name -> (label, unit).

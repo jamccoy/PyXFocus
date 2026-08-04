@@ -209,6 +209,76 @@ def test_collecting_area_is_geometric_only():
         'collecting_area should be geometric_area * throughput')
 
 
+def test_param_specs_cover_every_field():
+    """
+    The spec table and WolterParams cannot drift apart.
+
+    This is the test that would have caught `seed`: it is a WolterParams
+    field with no entry in the panel, so a saved configuration silently
+    reverted it to 0 on reload.
+    """
+    from PyXFocus.gui.wolter import WolterParams, PARAM_FIELDS, PARAM_SPECS
+    fields = set(vars(WolterParams()))
+    assert set(PARAM_FIELDS) == fields, (
+        'spec/field mismatch: %s' % (set(PARAM_FIELDS) ^ fields))
+    assert len(PARAM_SPECS) == len(fields), 'duplicate spec name'
+
+
+def test_param_spec_defaults_match_constructor():
+    """A spec default that disagrees with WolterParams is a silent trap."""
+    from PyXFocus.gui.wolter import WolterParams, PARAM_SPECS
+    defaults = WolterParams()
+    for spec in PARAM_SPECS:
+        assert float(spec.default) == float(getattr(defaults, spec.name)), (
+            '%s default %r != constructor %r'
+            % (spec.name, spec.default, getattr(defaults, spec.name)))
+
+
+def test_params_dict_roundtrip():
+    """to_dict -> json -> from_dict preserves all 15 fields exactly."""
+    import json
+    from PyXFocus.gui.wolter import WolterParams, PARAM_FIELDS
+    p = WolterParams(r0=300., z0=12000., offaxis=2.5, azimuth=90.,
+                     sec_dy=0.3, sec_rx=1.25, num_rays=12345, seed=42)
+    back = WolterParams.from_dict(json.loads(json.dumps(p.to_dict())))
+    for name in PARAM_FIELDS:
+        assert getattr(p, name) == getattr(back, name), (
+            '%s did not survive: %r -> %r'
+            % (name, getattr(p, name), getattr(back, name)))
+    assert isinstance(back.num_rays, int) and isinstance(back.seed, int)
+
+
+def test_params_from_dict_collects_problems():
+    """One bad field costs that field, not the whole configuration."""
+    from PyXFocus.gui.wolter import WolterParams
+    problems = []
+    p = WolterParams.from_dict(
+        {'r0': 300., 'psi': float('nan'), 'z0': 'banana', 'coating': 'Ir'},
+        problems)
+    assert p.r0 == 300., 'the good field should still be applied'
+    assert p.psi == WolterParams().psi, 'non-finite must fall back to default'
+    assert p.z0 == WolterParams().z0, 'non-numeric must fall back to default'
+    assert not hasattr(p, 'coating'), 'unknown keys must never be setattr-ed'
+    joined = ' '.join(problems)
+    for expect in ('coating', 'psi', 'z0'):
+        assert expect in joined, 'no problem recorded for %s' % expect
+
+
+def test_params_from_dict_rejects_non_finite():
+    """
+    NaN must not reach a spin box.
+
+    json.loads accepts a bare NaN token, and QDoubleSpinBox.setValue(nan)
+    silently yields the field MAXIMUM -- so an unguarded NaN would read
+    back as a deliberate extreme misalignment.
+    """
+    import json
+    from PyXFocus.gui.wolter import WolterParams
+    data = json.loads('{"sec_ry": NaN, "sec_rx": Infinity}')
+    p = WolterParams.from_dict(data)
+    assert p.sec_ry == 0. and p.sec_rx == 0.
+
+
 def test_reproducible():
     """The same seed gives the same answer twice."""
     from PyXFocus.gui.wolter import WolterParams, trace

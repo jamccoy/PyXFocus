@@ -13,6 +13,7 @@ The trace itself lives in :mod:`PyXFocus.gui.wolter` and has no Qt
 dependency, so anything you can set up here you can also script.
 """
 
+import math
 import sys
 import traceback
 
@@ -33,7 +34,11 @@ from PyXFocus.gui.wolter import WolterParams
 class TraceWorker(QtCore.QThread):
     """Runs a trace off the UI thread so the window stays responsive."""
 
-    finished = QtCore.pyqtSignal(object)
+    #: Named `traced`, not `finished`: a pyqtSignal called `finished` on a
+    #: QThread subclass REPLACES QThread's own finished() lifecycle signal,
+    #: which costs you deleteLater wiring and any "wait until the thread has
+    #: actually exited" logic. SweepWorker uses `swept` for the same reason.
+    traced = QtCore.pyqtSignal(object)
     failed = QtCore.pyqtSignal(str)
 
     def __init__(self, params, parent=None):
@@ -42,7 +47,7 @@ class TraceWorker(QtCore.QThread):
 
     def run(self):
         try:
-            self.finished.emit(wolter.trace(self.params))
+            self.traced.emit(wolter.trace(self.params))
         except Exception:
             self.failed.emit(traceback.format_exc())
 
@@ -55,55 +60,39 @@ class ParameterPanel(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super(ParameterPanel, self).__init__(parent)
         self._spins = {}
+        #: Parameters a configuration carries but the panel gives no field
+        #: for. Without this a saved seed would silently revert to 0 on
+        #: reload, which makes a "reproducible" configuration a lie.
+        self._carried = {}
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-
-        layout.addWidget(self._group('Geometry', [
-            ('r0', 'Shell radius r₀', 'mm', 220., 1., 5000., 3, 5.),
-            ('z0', 'Focal length z₀', 'mm', 8400., 100., 100000., 1, 100.),
-            ('primary_length', 'Primary length', 'mm', 100., 1., 2000., 1, 10.),
-            ('secondary_length', 'Secondary length', 'mm', 100., 1., 2000., 1, 10.),
-            ('psi', 'Prescription ψ', '', 1., 0.1, 10., 3, 0.1),
-        ]))
-
-        layout.addWidget(self._group('Source', [
-            ('offaxis', 'Off-axis angle', 'arcmin', 0., 0., 120., 3, 0.5),
-            ('azimuth', 'Azimuth', 'deg', 0., 0., 360., 1, 15.),
-            ('num_rays', 'Number of rays', '', 20000., 100., 500000., 0, 5000.),
-        ]))
-
-        # Ranges here are capped by the backend's safe limits -- see
-        # wolter.check_misalignment for why they exist.
-        tmax = wolter.MAX_TRANSLATION_MM
-        rmax = wolter.MAX_ROTATION_ARCMIN
-        layout.addWidget(self._group('Secondary misalignment', [
-            ('sec_dx', 'Shift x', 'mm', 0., -tmax, tmax, 4, 0.01),
-            ('sec_dy', 'Shift y', 'mm', 0., -tmax, tmax, 4, 0.01),
-            ('sec_dz', 'Shift z', 'mm', 0., -tmax, tmax, 4, 0.01),
-            ('sec_rx', 'Tilt about x', 'arcmin', 0., -rmax, rmax, 4, 0.05),
-            ('sec_ry', 'Tilt about y', 'arcmin', 0., -rmax, rmax, 4, 0.05),
-            ('sec_rz', 'Tilt about z', 'arcmin', 0., -rmax, rmax, 4, 0.05),
-        ]))
-
+        for title, names in wolter.PARAM_GROUPS:
+            layout.addWidget(self._group(title, names))
         layout.addStretch(1)
 
-    def _group(self, title, rows):
+        grouped = set(n for _, names in wolter.PARAM_GROUPS for n in names)
+        for spec in wolter.PARAM_SPECS:
+            if spec.name not in grouped:
+                self._carried[spec.name] = spec.default
+
+    def _group(self, title, names):
         box = QtWidgets.QGroupBox(title)
         form = QtWidgets.QFormLayout(box)
         form.setLabelAlignment(QtCore.Qt.AlignRight)
-        for name, label, unit, default, lo, hi, decimals, step in rows:
+        for name in names:
+            spec = wolter.param_spec(name)
             spin = QtWidgets.QDoubleSpinBox()
-            spin.setDecimals(decimals)
-            spin.setRange(lo, hi)
-            spin.setSingleStep(step)
-            spin.setValue(default)
+            spin.setDecimals(spec.decimals)
+            spin.setRange(spec.lo, spec.hi)
+            spin.setSingleStep(spec.step)
+            spin.setValue(spec.default)
             spin.setKeyboardTracking(False)
-            if unit:
-                spin.setSuffix(' ' + unit)
+            if spec.unit:
+                spin.setSuffix(' ' + spec.unit)
             spin.valueChanged.connect(self.changed)
             self._spins[name] = spin
-            form.addRow(label + ':', spin)
+            form.addRow(spec.label + ':', spin)
         return box
 
     def params(self):
@@ -112,15 +101,64 @@ class ParameterPanel(QtWidgets.QWidget):
         for name, spin in self._spins.items():
             value = spin.value()
             setattr(p, name, int(value) if name == 'num_rays' else value)
+        for name, value in self._carried.items():
+            setattr(p, name, value)
         return p
 
-    def reset(self):
-        defaults = WolterParams()
-        for name, spin in self._spins.items():
+    def set_params(self, params):
+        """
+        Write ``params`` into the fields.
+
+        Returns a list of ``(name, requested, applied)`` for every field
+        that would not take its value verbatim. Callers must surface it: a
+        spin box clamps in silence, so a load that says nothing claims to
+        have loaded a configuration the user never wrote.
+
+        ``changed`` is emitted exactly once, after every field has settled,
+        so a listener calling :meth:`params` sees one consistent set rather
+        than fifteen half-applied ones.
+        """
+        adjusted = []
+        for spin in self._spins.values():
             spin.blockSignals(True)
-            spin.setValue(float(getattr(defaults, name)))
-            spin.blockSignals(False)
+        try:
+            for name, spin in self._spins.items():
+                if not hasattr(params, name):
+                    continue
+                wanted = float(getattr(params, name))
+
+                if not math.isfinite(wanted):
+                    # setValue(nan) silently yields the maximum, which then
+                    # reads back as a deliberate extreme. Leave the field.
+                    adjusted.append((name, wanted, spin.value()))
+                    continue
+
+                if name == 'num_rays':
+                    # decimals=0 rounds rather than truncates, and params()
+                    # takes int() of whatever lands; round here so the value
+                    # reported as applied is the value actually used.
+                    wanted = float(int(round(wanted)))
+
+                spin.setValue(wanted)
+                applied = spin.value()
+                # Half a least-significant digit: anything larger is a clamp
+                # or a real loss of precision, not display rounding.
+                if abs(applied - wanted) > 0.5 * 10 ** -spin.decimals():
+                    adjusted.append((name, wanted, applied))
+        finally:
+            for spin in self._spins.values():
+                spin.blockSignals(False)
+
+        for name in self._carried:
+            if hasattr(params, name):
+                self._carried[name] = getattr(params, name)
+
         self.changed.emit()
+        return adjusted
+
+    def reset(self):
+        """Restore every field to its default."""
+        return self.set_params(WolterParams())
 
 
 class MetricsBar(QtWidgets.QWidget):
@@ -294,7 +332,7 @@ class SweepTab(QtWidgets.QWidget):
         self.run_button.clicked.connect(self.run_sweep)
         self.cancel_button = QtWidgets.QPushButton('Cancel')
         self.cancel_button.setEnabled(False)
-        self.cancel_button.clicked.connect(self._cancel)
+        self.cancel_button.clicked.connect(self.cancel)
         self.save_button = QtWidgets.QPushButton('Save CSV…')
         self.save_button.setEnabled(False)
         self.save_button.clicked.connect(self.save_csv)
@@ -363,7 +401,16 @@ class SweepTab(QtWidgets.QWidget):
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
 
-    def _cancel(self):
+    def is_running(self):
+        """True while a sweep is in flight (drives the Run menu)."""
+        return self._worker is not None and self._worker.isRunning()
+
+    def has_result(self):
+        """True when there is a sweep worth exporting."""
+        return self._result is not None and bool(self._result.valid.any())
+
+    def cancel(self):
+        """Ask the running sweep to stop after the current point."""
         if self._worker is not None:
             self._worker.cancel()
 
@@ -718,8 +765,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.trace_button.setEnabled(False)
         self.statusBar().showMessage('Tracing…')
         self._worker = TraceWorker(self.panel.params(), self)
-        self._worker.finished.connect(self._on_finished)
+        self._worker.traced.connect(self._on_finished)
         self._worker.failed.connect(self._on_failed)
+        # Without this every trace leaves a QThread QObject parented to the
+        # window forever; a session with auto-trace on accumulates hundreds.
+        self._worker.finished.connect(self._worker.deleteLater)
         self._worker.start()
 
     def _on_finished(self, result):
