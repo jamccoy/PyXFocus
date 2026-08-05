@@ -279,6 +279,345 @@ def test_params_from_dict_rejects_non_finite():
     assert p.sec_ry == 0. and p.sec_rx == 0.
 
 
+def _config_doc(**parameters):
+    """A minimal valid configuration document, as text."""
+    import json
+    from PyXFocus.gui import config
+    return json.dumps({'format': config.FORMAT, 'version': config.VERSION,
+                       'parameters': parameters})
+
+
+def test_config_text_round_trip():
+    """params -> text -> params preserves all 15 fields and reports nothing."""
+    from PyXFocus.gui import config
+    from PyXFocus.gui.wolter import WolterParams, PARAM_FIELDS
+    p = WolterParams(r0=300., z0=12000., offaxis=2.5, sec_dy=0.3,
+                     num_rays=12345, seed=42)
+    loaded = config.load_config_text(config.config_text(p))
+    for name in PARAM_FIELDS:
+        assert getattr(p, name) == getattr(loaded.params, name), name
+    assert loaded.problems == [], loaded.problems
+    assert loaded.version == config.VERSION
+    assert isinstance(loaded.params.num_rays, int)
+    assert isinstance(loaded.params.seed, int)
+
+
+def test_config_file_round_trip():
+    """The same through an actual file."""
+    import os
+    import tempfile
+    from PyXFocus.gui import config
+    from PyXFocus.gui.wolter import WolterParams
+    path = os.path.join(tempfile.mkdtemp(), 'cfg.json')
+    config.save_config(WolterParams(r0=333.), path)
+    loaded = config.load_config(path)
+    assert loaded.params.r0 == 333.
+    assert loaded.path == path
+
+
+def test_config_envelope_shape():
+    """The written document says what it is, and annotates its own units."""
+    import json
+    from PyXFocus.gui import config
+    from PyXFocus.gui.wolter import WolterParams, PARAM_FIELDS
+    text = config.config_text(WolterParams())
+    assert text.endswith('\n'), 'text files should end with a newline'
+    doc = json.loads(text)
+    assert doc['format'] == config.FORMAT
+    assert doc['version'] == config.VERSION
+    assert set(doc['units']) == set(doc['parameters']) == set(PARAM_FIELDS)
+    assert 'ui' not in doc, 'an empty ui block should be omitted entirely'
+
+
+def test_config_refuses_to_write_non_finite():
+    """A NaN is refused before any file is touched."""
+    import os
+    import tempfile
+    from PyXFocus.gui import config
+    from PyXFocus.gui.wolter import WolterParams
+    path = os.path.join(tempfile.mkdtemp(), 'never.json')
+    try:
+        config.save_config(WolterParams(sec_dy=float('nan')), path)
+    except config.ConfigError:
+        pass
+    else:
+        raise AssertionError('expected ConfigError for a NaN parameter')
+    assert not os.path.exists(path), 'a refused save must create no file'
+
+
+def test_config_failed_save_leaves_the_old_file_intact():
+    """
+    The point of writing to a temp file and renaming.
+
+    A save that fails must leave the previous configuration readable, and
+    must not litter the directory with partial files.
+    """
+    import glob
+    import os
+    import tempfile
+    from PyXFocus.gui import config
+    from PyXFocus.gui.wolter import WolterParams
+    folder = tempfile.mkdtemp()
+    path = os.path.join(folder, 'cfg.json')
+    config.save_config(WolterParams(r0=333.), path)
+    try:
+        config.save_config(WolterParams(r0=444., sec_dy=float('nan')), path)
+    except config.ConfigError:
+        pass
+    assert config.load_config(path).params.r0 == 333., 'old file was damaged'
+    assert not glob.glob(os.path.join(folder, '*.tmp')), 'temp file left behind'
+
+
+def test_config_rejects_a_foreign_file():
+    """Anything that is not one of our configurations is an error, not notes."""
+    import json
+    from PyXFocus.gui import config
+    cases = ['not json at all', '[]', '{}',
+             json.dumps({'format': 'chandra-model', 'version': 1})]
+    for text in cases:
+        try:
+            config.load_config_text(text)
+        except config.ConfigError:
+            continue
+        raise AssertionError('expected ConfigError for %r' % text[:40])
+
+
+def test_config_refuses_a_future_version():
+    """
+    A newer format is refused by name.
+
+    The parameters block is deliberately valid: refusal is about the
+    version, not the contents.
+    """
+    import json
+    from PyXFocus.gui import config
+    from PyXFocus.gui.wolter import WolterParams
+    text = json.dumps({'format': config.FORMAT,
+                       'version': config.VERSION + 1,
+                       'parameters': WolterParams().to_dict()})
+    try:
+        config.load_config_text(text)
+    except config.ConfigError as err:
+        assert str(config.VERSION + 1) in str(err)
+        assert 'newer' in str(err)
+    else:
+        raise AssertionError('expected ConfigError for a future version')
+
+
+def test_config_every_past_version_has_a_migration():
+    """
+    The migration table may not develop gaps.
+
+    Vacuous while VERSION is 1. The moment someone bumps it this fails
+    until they write the hop -- even an identity function. The runtime
+    stays forgiving about missing migrations; the suite does not.
+    """
+    from PyXFocus.gui import config
+    expected = list(range(config.OLDEST, config.VERSION))
+    assert sorted(config._MIGRATIONS) == expected, (
+        'migration table %s does not cover %s'
+        % (sorted(config._MIGRATIONS), expected))
+
+
+def test_config_missing_parameters_is_an_error():
+    """
+    A file with no usable parameters must not load as "all defaults".
+
+    from_dict alone would happily return a full set of defaults with one
+    note, which is exactly the silent misread this module exists to stop.
+    """
+    import json
+    from PyXFocus.gui import config
+    for payload in ({'format': config.FORMAT, 'version': 1},
+                    {'format': config.FORMAT, 'version': 1, 'parameters': []}):
+        try:
+            config.load_config_text(json.dumps(payload))
+        except config.ConfigError:
+            continue
+        raise AssertionError('expected ConfigError for %r' % (payload,))
+
+
+def test_config_missing_field_defaults_with_a_note():
+    """One absent field costs that field, not the configuration."""
+    from PyXFocus.gui import config
+    from PyXFocus.gui.wolter import WolterParams
+    loaded = config.load_config_text(_config_doc(r0=300.))
+    assert loaded.params.r0 == 300.
+    assert loaded.params.psi == WolterParams().psi
+    assert any('psi' in note for note in loaded.problems)
+
+
+def test_config_unknown_keys_are_noted_never_set():
+    """A typo must not become a silent attribute."""
+    import json
+    from PyXFocus.gui import config
+    text = json.dumps({'format': config.FORMAT, 'version': 1,
+                       'coating': 'Ir',
+                       'parameters': {'r0': 300., 'sec_dyy': 5.}})
+    loaded = config.load_config_text(text)
+    assert not hasattr(loaded.params, 'sec_dyy')
+    joined = ' '.join(loaded.problems)
+    assert 'sec_dyy' in joined and 'coating' in joined
+
+
+def test_config_non_finite_field_falls_back():
+    """
+    Bare NaN and Infinity tokens are accepted by json but not by us.
+
+    QDoubleSpinBox.setValue(nan) silently yields the field maximum, so an
+    unguarded NaN would read back as a deliberate extreme misalignment.
+    """
+    from PyXFocus.gui import config
+    text = ('{"format": "%s", "version": 1, "parameters": '
+            '{"sec_ry": NaN, "sec_rx": Infinity}}' % config.FORMAT)
+    loaded = config.load_config_text(text)
+    assert loaded.params.sec_ry == 0.
+    assert loaded.params.sec_rx == 0.
+
+
+def test_config_reports_out_of_range_but_loads_it_verbatim():
+    """
+    Range violations are reported here and clamped in the panel.
+
+    Loading verbatim is what keeps this module usable from a script that
+    has no widget to clamp against.
+    """
+    from PyXFocus.gui import config
+    from PyXFocus.gui.wolter import MAX_TRANSLATION_MM
+    over = MAX_TRANSLATION_MM * 2
+    loaded = config.load_config_text(_config_doc(sec_dy=over))
+    assert loaded.params.sec_dy == over, 'value must not be clamped here'
+    assert any('sec_dy' in note for note in loaded.problems)
+
+
+def test_config_range_check_skips_seed():
+    """seed has no range; check_ranges must not trip over lo=None."""
+    from PyXFocus.gui import config
+    loaded = config.load_config_text(_config_doc(seed=10 ** 9))
+    assert loaded.params.seed == 10 ** 9
+    assert not any('seed' in note for note in loaded.problems)
+
+
+def test_config_seed_none_round_trips():
+    """
+    An unseeded configuration stays unseeded.
+
+    seed=None means "do not seed" and trace() honours it, which is a
+    different run from seeding with zero.
+    """
+    from PyXFocus.gui import config
+    from PyXFocus.gui.wolter import WolterParams
+    loaded = config.load_config_text(config.config_text(WolterParams(seed=None)))
+    assert loaded.params.seed is None
+    assert loaded.problems == [], loaded.problems
+
+
+def test_config_ui_is_optional_and_round_trips():
+    """Interface state survives, and its absence is not a complaint."""
+    from PyXFocus.gui import config
+    from PyXFocus.gui.wolter import WolterParams
+    # A complete parameters block, so the only thing that could raise a
+    # note here is the absent ui block -- which must not.
+    loaded = config.load_config_text(_config_doc(**WolterParams().to_dict()))
+    assert loaded.ui == {}, loaded.ui
+    assert loaded.problems == [], loaded.problems
+
+    ui = {'tab': 3, 'auto_trace': True,
+          'sweep': {'parameter': 'sec_dy', 'start': 0., 'stop': 1., 'steps': 30}}
+    back = config.load_config_text(config.config_text(WolterParams(), ui))
+    assert back.ui['tab'] == 3
+    assert back.ui['auto_trace'] is True
+    assert back.ui['sweep']['parameter'] == 'sec_dy'
+    assert back.ui['sweep']['steps'] == 30
+
+
+def test_config_ui_never_reaches_parameters():
+    """The two blocks are sealed off from each other in both directions."""
+    import json
+    from PyXFocus.gui import config
+    from PyXFocus.gui.wolter import WolterParams
+    text = json.dumps({'format': config.FORMAT, 'version': 1,
+                       'parameters': {'tab': 3},
+                       'ui': {'r0': 1.0}})
+    loaded = config.load_config_text(text)
+    assert not hasattr(loaded.params, 'tab')
+    assert loaded.params.r0 == WolterParams().r0
+    assert 'r0' not in loaded.ui
+
+
+def test_config_ui_rejects_bad_types():
+    """
+    ui degrades block by block, and only real booleans are booleans.
+
+    The string 'false' is truthy -- the same trap the QSettings reads
+    guard against with type=.
+    """
+    import json
+    from PyXFocus.gui import config
+    text = json.dumps({
+        'format': config.FORMAT, 'version': 1, 'parameters': {},
+        'ui': {'auto_trace': 'false', 'tab': -1,
+               'sweep': {'parameter': 'sec_dy', 'start': 0.}}})
+    loaded = config.load_config_text(text)
+    assert 'auto_trace' not in loaded.ui
+    assert 'tab' not in loaded.ui
+    assert 'sweep' not in loaded.ui, 'a half-specified range is not a range'
+
+
+def test_config_units_are_written_but_not_read():
+    """
+    The tripwire for anyone who wires the units map up.
+
+    Rewriting every unit to nonsense must change nothing and raise no note.
+    Reading units would mean this module converts them, which it does not.
+    """
+    import json
+    from PyXFocus.gui import config
+    from PyXFocus.gui.wolter import WolterParams
+    doc = json.loads(config.config_text(WolterParams(r0=250., sec_rx=1.5)))
+    doc['units'] = dict((key, 'furlong') for key in doc['units'])
+    loaded = config.load_config_text(json.dumps(doc))
+    assert loaded.params.r0 == 250. and loaded.params.sec_rx == 1.5
+    assert loaded.problems == [], loaded.problems
+
+
+def test_config_duplicate_key_is_noted():
+    """json.loads keeps the last silently; a hand-edited file deserves better."""
+    from PyXFocus.gui import config
+    text = ('{"format": "%s", "version": 1, '
+            '"parameters": {"r0": 1.0, "r0": 250.0}}' % config.FORMAT)
+    loaded = config.load_config_text(text)
+    assert loaded.params.r0 == 250.
+    assert any('more than once' in note for note in loaded.problems)
+
+
+def test_config_unreadable_path_is_an_error():
+    """A missing file and a directory both fail with the path in the message."""
+    import tempfile
+    from PyXFocus.gui import config
+    for path in ('/no/such/file/anywhere.json', tempfile.mkdtemp()):
+        try:
+            config.load_config(path)
+        except config.ConfigError as err:
+            assert path in str(err)
+        else:
+            raise AssertionError('expected ConfigError for %r' % path)
+
+
+def test_config_imports_without_qt():
+    """
+    config.py must stay importable without PyQt5.
+
+    The README promises PyQt5 is needed "only if you want the GUI", and
+    this suite is the post-build install check.
+    """
+    import subprocess
+    import sys
+    subprocess.check_call([
+        sys.executable, '-c',
+        'import sys, PyXFocus.gui.config; assert "PyQt5" not in sys.modules'])
+
+
 def test_reproducible():
     """The same seed gives the same answer twice."""
     from PyXFocus.gui.wolter import WolterParams, trace

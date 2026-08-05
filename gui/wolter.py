@@ -138,11 +138,20 @@ class WolterParams(object):
 
         Deliberately Qt-free so configurations can be written and read from
         a script or a notebook, not only from the GUI.
+
+        ``seed`` may be None, which means "do not seed" and is a different
+        trace from seeding with zero -- so it is carried through as None
+        rather than coerced.
         """
         out = collections.OrderedDict()
         for name in PARAM_FIELDS:
             value = getattr(self, name)
-            out[name] = int(value) if name in _INT_FIELDS else float(value)
+            if name == 'seed' and value is None:
+                out[name] = None
+            elif name in _INT_FIELDS:
+                out[name] = int(value)
+            else:
+                out[name] = float(value)
         return out
 
     @classmethod
@@ -178,10 +187,16 @@ class WolterParams(object):
 
         for name in PARAM_FIELDS:
             if name not in data:
-                problems.append('%s missing; using default %g'
+                problems.append('%s missing; using default %r'
                                 % (name, getattr(params, name)))
                 continue
             raw = data[name]
+            # A null seed means "do not seed", which trace() honours and
+            # which is a different run from seeding with zero. Accept it
+            # rather than reporting it as a bad number.
+            if name == 'seed' and raw is None:
+                params.seed = None
+                continue
             try:
                 value = float(raw)
             except (TypeError, ValueError):
