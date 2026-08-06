@@ -604,6 +604,30 @@ def test_config_unreadable_path_is_an_error():
             raise AssertionError('expected ConfigError for %r' % path)
 
 
+def test_settings_is_the_only_qsettings_consumer():
+    """
+    QSettings stays behind the AppSettings facade.
+
+    Pure string work -- no import, no Qt -- so it belongs in the install
+    check. Without it the facade gets bypassed the first time someone wants
+    to remember one more thing, and key strings start appearing in two
+    files with nothing keeping them in step.
+    """
+    import glob
+    import os
+    folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gui')
+    offenders = []
+    for path in sorted(glob.glob(os.path.join(folder, '*.py'))):
+        if os.path.basename(path) == 'settings.py':
+            continue
+        # 'QSettings(' -- a construction, not a mention. Other modules
+        # legitimately talk *about* QSettings in comments; what must not
+        # happen is another module reaching for one.
+        if 'QSettings(' in open(path).read():
+            offenders.append(os.path.basename(path))
+    assert not offenders, 'QSettings constructed outside settings.py: %s' % offenders
+
+
 def test_config_imports_without_qt():
     """
     config.py must stay importable without PyQt5.

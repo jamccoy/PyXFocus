@@ -27,6 +27,7 @@ from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PyQt5 import QtCore, QtWidgets
 
+from PyXFocus.gui import settings
 from PyXFocus.gui import wolter
 from PyXFocus.gui.wolter import WolterParams
 
@@ -689,12 +690,18 @@ print("HPD [arcsec]:", hpd_arcsec)
 
 class MainWindow(QtWidgets.QMainWindow):
 
-    def __init__(self):
+    def __init__(self, store=None):
         super(MainWindow, self).__init__()
         self.setWindowTitle('PyXFocus — Wolter-I Explorer')
-        self.resize(1180, 780)
+        # The pre-restore default; restore_geometry leaves it alone when
+        # nothing has been saved yet.
+        self.resize(*settings.DEFAULT_SIZE)
         self._worker = None
         self._result = None
+        self.config_path = None
+        #: Stashed rather than shown -- see _note_restore.
+        self._restore_note = ''
+        self.settings = store if store is not None else settings.AppSettings()
 
         self.panel = ParameterPanel()
         self.panel.changed.connect(self._on_changed)
@@ -738,11 +745,11 @@ class MainWindow(QtWidgets.QMainWindow):
         right_box.addWidget(self.metrics)
         right_box.addWidget(self.tabs, 1)
 
-        splitter = QtWidgets.QSplitter()
-        splitter.addWidget(left)
-        splitter.addWidget(right)
-        splitter.setStretchFactor(1, 1)
-        self.setCentralWidget(splitter)
+        self.splitter = QtWidgets.QSplitter()
+        self.splitter.addWidget(left)
+        self.splitter.addWidget(right)
+        self.splitter.setStretchFactor(1, 1)
+        self.setCentralWidget(self.splitter)
 
         self.statusBar().showMessage('Ready')
 
@@ -752,7 +759,100 @@ class MainWindow(QtWidgets.QMainWindow):
         self._timer.setInterval(250)
         self._timer.timeout.connect(self.run_trace)
 
-        self.run_trace()
+        # Geometry first: splitter state is absolute pixels, so restoring it
+        # into a default-sized window and then resizing would give the user
+        # proportions they never chose.
+        self.settings.restore_geometry(self)        # before show(); main shows
+        self.settings.restore_window_state(self)    # no toolbars until Phase 4
+        self._restore_session()
+
+        # set_params emits `changed`, which arms the debounce; belt and braces
+        # with the blockSignals in _restore_session. An armed timer plus the
+        # singleShot below is two traces on every launch.
+        self._timer.stop()
+
+        # One trace, deferred. A bare run_trace() here would trace the
+        # defaults, because restore has not happened at that point in
+        # __init__ -- and once it has, restore schedules a second trace of
+        # the real values. singleShot(0) runs after __init__ returns.
+        QtCore.QTimer.singleShot(0, self.run_trace)
+
+    def _restore_session(self):
+        """Put back the layout and parameters from the last run."""
+        store = self.settings
+        problems = []
+        adjusted = []
+
+        params = store.session_params(problems)
+        if params is not None:
+            # Block on the panel rather than the timer: this stops `changed`
+            # being emitted at all instead of undoing its effect.
+            self.panel.blockSignals(True)
+            try:
+                adjusted = self.panel.set_params(params)
+            finally:
+                self.panel.blockSignals(False)
+
+        self.auto_box.setChecked(store.auto_trace())
+
+        blob = store.splitter_state()
+        if not blob.isEmpty():
+            self.splitter.restoreState(blob)
+
+        tab = store.tab()
+        # config._clean_ui deliberately does not bound the tab index -- how
+        # many tabs exist is a Qt fact it does not know. This is that bound.
+        if 0 <= tab < self.tabs.count():
+            self.tabs.setCurrentIndex(tab)
+
+        self.config_path = store.config_path() or None
+        self._note_restore(adjusted, problems)
+
+    def _note_restore(self, adjusted, problems):
+        """
+        Say what the restore could not honour -- status bar, never a modal.
+
+        A dialog here would fire on every launch after a range change, before
+        the user has touched anything, offering only OK.
+
+        The note is stashed rather than shown because the deferred trace
+        overwrites the status bar with 'Tracing…' within milliseconds, so a
+        showMessage() here is technically correct and literally invisible.
+        _on_finished appends it to the first trace's line instead.
+        """
+        notes = ['%s %g → %g' % (name, req, app) for name, req, app in adjusted]
+        if not notes and not problems:
+            return
+        if notes:
+            self._restore_note = (
+                'restored session: %d value%s adjusted to fit — %s%s'
+                % (len(notes), '' if len(notes) == 1 else 's',
+                   ', '.join(notes[:3]), ', …' if len(notes) > 3 else ''))
+        else:
+            self._restore_note = 'restored session: %s' % problems[0]
+        # Nothing is lost: the full list is one hover away.
+        self.statusBar().setToolTip('\n'.join(notes + problems))
+
+    def save_settings(self):
+        """
+        Persist layout and session. Idempotent, and never raises.
+
+        Runs on quit, so an exception here would crash on exit and -- once
+        Phase 6 adds closeEvent -- leave a window that cannot be closed.
+        Phase 6 calls this same method, so the two do not duplicate work.
+        """
+        try:
+            store = self.settings
+            store.save_geometry(self)
+            store.save_window_state(self)
+            store.set_splitter_state(self.splitter.saveState())
+            store.set_tab(self.tabs.currentIndex())
+            store.set_auto_trace(self.auto_box.isChecked())
+            store.set_session_params(self.panel.params())
+            store.set_config_path(self.config_path)
+            store.sync()
+        except Exception:
+            traceback.print_exc()
 
     def _on_changed(self):
         if self.auto_box.isChecked():
@@ -764,13 +864,23 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.trace_button.setEnabled(False)
         self.statusBar().showMessage('Tracing…')
-        self._worker = TraceWorker(self.panel.params(), self)
-        self._worker.traced.connect(self._on_finished)
-        self._worker.failed.connect(self._on_failed)
-        # Without this every trace leaves a QThread QObject parented to the
-        # window forever; a session with auto-trace on accumulates hundreds.
-        self._worker.finished.connect(self._worker.deleteLater)
-        self._worker.start()
+        worker = TraceWorker(self.panel.params(), self)
+        self._worker = worker
+        worker.traced.connect(self._on_finished)
+        worker.failed.connect(self._on_failed)
+        # Without deleteLater every trace leaves a QThread QObject parented
+        # to the window forever; a session with auto-trace on accumulates
+        # hundreds. But dropping the C++ object leaves self._worker dangling,
+        # and the isRunning() guard above then raises RuntimeError on the
+        # next trace -- so forget the reference at the same time.
+        worker.finished.connect(worker.deleteLater)
+        worker.finished.connect(lambda: self._forget_worker(worker))
+        worker.start()
+
+    def _forget_worker(self, worker):
+        """Drop our reference once a worker has finished, if it is still ours."""
+        if self._worker is worker:
+            self._worker = None
 
     def _on_finished(self, result):
         self.trace_button.setEnabled(True)
@@ -786,6 +896,12 @@ class MainWindow(QtWidgets.QMainWindow):
                   % (result.num_launched, result.hpd_arcsec))
         if result.warnings:
             status += '  ⚠ ' + ' '.join(result.warnings)
+        # Anything the session restore could not honour rides along with the
+        # first trace, since a message shown during __init__ is overwritten
+        # by 'Tracing…' before it can be read.
+        if self._restore_note:
+            status += '  ⚠ ' + self._restore_note
+            self._restore_note = ''
         self.statusBar().showMessage(status)
 
     def _on_failed(self, message):
@@ -825,8 +941,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
 def main():
-    app = QtWidgets.QApplication(sys.argv)
-    window = MainWindow()
+    argv, wants_reset = settings.take_reset_flag(sys.argv)
+    app = QtWidgets.QApplication(argv)
+    settings.apply_identity()
+
+    store = settings.AppSettings()
+    if wants_reset:
+        store.reset()
+        print('Settings reset (%s)' % store.file_name())
+
+    window = MainWindow(store)
+    # There is no closeEvent yet -- Phase 6 adds one. aboutToQuit fires on
+    # Quit and on the last window closing, and is worth keeping even after
+    # Phase 6: closeEvent does not run when a session manager terminates the
+    # app. Both call the same idempotent method.
+    app.aboutToQuit.connect(window.save_settings)
+
     window.show()
     return app.exec_()
 

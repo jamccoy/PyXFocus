@@ -69,7 +69,14 @@ python -m PyXFocus.test_smoke
 
 All checks should pass. These verify the package imports and that the physics
 is still right (an on-axis Wolter-I focuses to a point, off-axis coma grows
-with field angle, and so on).
+with field angle, and so on). This suite imports no Qt, so it works as an
+install check whether or not you want the GUI.
+
+If you are using the GUI there is a second suite covering the Qt layer:
+
+```bash
+python -m PyXFocus.test_gui_smoke
+```
 
 ### Optional dependency
 
@@ -151,6 +158,28 @@ per-ray graze angles to feed it.
 settings, so the GUI can be used to find a configuration and then hand it
 back to you as code.
 
+### What it remembers
+
+The explorer reopens where you left it: window size and position, the
+splitter, the active tab, the auto-trace setting, and the parameters you were
+working on. Nothing else is stored, and nothing leaves your machine.
+
+Settings live in the platform's usual place — on macOS,
+`~/Library/Preferences/com.pyxfocus.WolterExplorer.plist`. To start from a
+clean slate:
+
+```bash
+python -m PyXFocus.gui.app --reset-settings
+```
+
+Use the flag rather than deleting the file by hand: on macOS the preferences
+daemon caches it in memory and rewrites it from that cache, so removing the
+file appears to work and then the old settings come back.
+
+If a remembered value no longer fits the panel's range — because a limit
+changed between versions — it is clamped and the adjustment is reported in
+the status bar alongside the first trace, never as a dialog.
+
 ### Misalignment limits
 
 The secondary misalignment fields are capped at ±20 mm and ±15 arcmin. This
@@ -231,7 +260,10 @@ print('HPD [arcsec]:', anal.hpd(rays) / z0 * 180 / np.pi * 3600)
 | `gui/wolter.py` | One-call Wolter-I trace, plus parameter sweeps |
 | `gui/app.py` | PyQt5 Wolter-I Explorer |
 | `build_extensions.py` | Compiles the Fortran extensions |
-| `test_smoke.py` | Import and physics checks |
+| `test_smoke.py` | Import and physics checks (no Qt) |
+| `test_gui_smoke.py` | Settings persistence and window restore (needs PyQt5) |
+| `gui/config.py` | Versioned JSON configuration format |
+| `gui/settings.py` | What the app remembers between runs |
 
 ### A note on `examples/`
 
