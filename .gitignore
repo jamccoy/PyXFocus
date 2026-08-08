@@ -10,3 +10,6 @@
 *.iml
 # Ignore files for ipython/jupyter notebook and jupyter lab.
 .ipynb_checkpoints/*
+# The macOS launcher is a local build artifact (tools/make_launcher.py
+# regenerates it, with this machine's interpreter path baked in).
+*.app/

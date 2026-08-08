@@ -101,6 +101,25 @@ misaligning a Wolter-I grazing-incidence telescope:
 python -m PyXFocus.gui.app
 ```
 
+### A double-clickable app (macOS)
+
+To launch it from Finder or the Dock instead of a terminal, build a launcher
+once:
+
+```bash
+python tools/make_icon.py       # only needed again if the artwork changes
+python tools/make_launcher.py
+```
+
+This creates `~/Documents/software_development/PyXFocus.app` — a small
+bundle whose launch script has this machine's interpreter path and this
+repository's location baked in. It is a local build artifact, not something
+that can be committed or shared: rebuild it if the repository moves or you
+switch interpreters, and `python tools/make_launcher.py --check` will tell
+you if it has gone stale. If it fails to start, the failure shows up as a
+dialog rather than a bounced Dock icon, and the details land in
+`~/Library/Logs/PyXFocus.log`.
+
 Set the shell radius, focal length, mirror lengths, source off-axis angle and
 secondary misalignment in the left-hand panel. The trace re-runs
 automatically and reports:
@@ -264,6 +283,9 @@ print('HPD [arcsec]:', anal.hpd(rays) / z0 * 180 / np.pi * 3600)
 | `test_gui_smoke.py` | Settings persistence and window restore (needs PyQt5) |
 | `gui/config.py` | Versioned JSON configuration format |
 | `gui/settings.py` | What the app remembers between runs |
+| `gui/icon.py` | The app icon, drawn programmatically |
+| `tools/make_icon.py` | Builds `resources/PyXFocus.icns` |
+| `tools/make_launcher.py` | Builds the double-clickable macOS `.app` |
 
 ### A note on `examples/`
 
